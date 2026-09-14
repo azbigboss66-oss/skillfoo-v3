@@ -13,6 +13,7 @@
 
 <p align="center">
   <strong><a href="https://skillfoo-v32-evolution.warm-chub-8493.chatgpt.site/">在线原型</a></strong>
+  · <a href="web/README.md">前端源码与本地预览</a>
   · <a href="#快速开始">快速开始</a>
   · <a href="docs/U1_CONTRACT.md">U1 合同</a>
   · <a href="https://github.com/azbigboss66-oss/skillfoo-v3/issues">Issues</a>
