@@ -1,0 +1,32 @@
+{
+  "name": "skillfoo-v3",
+  "version": "1.0.0",
+  "description": "A governed CLI for bounded SKILL.md evolution under frozen evaluation and evidence contracts.",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/azbigboss66-oss/skillfoo-v3.git"
+  },
+  "bugs": {
+    "url": "https://github.com/azbigboss66-oss/skillfoo-v3/issues"
+  },
+  "homepage": "https://skillfoo-v32-evolution.warm-chub-8493.chatgpt.site/",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "bin": { "skillfoo-v3": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/**/*.test.js",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.4"
+  }
+}

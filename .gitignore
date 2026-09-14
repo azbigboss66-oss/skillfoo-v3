@@ -1,0 +1,105 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+.wrangler/
+
+# Separate local showcase and verification evidence (never part of the CLI source package)
+/demo/
+/reports/
+
+# Environment variables (never commit API keys)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Run outputs (local only, never commit user prompts or results)
+runs/
+**/raw-provider-response*
+**/provider-response*
+**/provider-check.json
+**/adaptive-events.jsonl
+
+# Local U1 evidence lanes and sealed material
+/projects/
+**/development-evidence/
+**/formal-evidence/
+**/evaluation-holdout.v3.json
+**/sealed/
+**/sealed-holdout*.json
+
+# Real human confirmations are local governance records.
+**/task-card.confirmed.json
+**/evaluation-review.confirmed.json
+**/formal-approval*.json
+**/real-human-confirmation*.json
+**/human-confirmation*.json
+**/operator-confirmation*.json
+**/confirmation-record*.json
+
+# Real business/operator inputs stay local.
+**/real-inputs/
+**/business-inputs/
+**/operator-inputs/
+**/real-input*.json
+**/real-input*.yaml
+**/real-input*.yml
+**/real-input*.md
+**/real-input*.txt
+**/business-input*.json
+**/business-input*.yaml
+**/business-input*.yml
+**/business-input*.md
+**/business-input*.txt
+**/operator-input*.json
+**/operator-input*.yaml
+**/operator-input*.yml
+**/operator-input*.md
+**/operator-input*.txt
+**/machine-local/
+**/local-path-materials/
+
+# Local execution records and human-governance material
+V3_2_EXECUTION_PROGRESS.md
+V3_2_PARALLEL_STANDARD_PLAN.md
+V3_2_THREE_CASE_VALIDATION_PLAN.md
+V3_2_U1_CLOSURE_PLAN.md
+docs/superpowers/
+SkillFoo-业务需求与目标问卷.docx
+
+# Persistent release ledgers (local release state)
+releases/
+
+# Temporary directories
+tmp-*/
+.formal-approval-tmp-*/
+*.tmp
+*.bak
+*.backup
+*~
+
+# npm cache
+.npm-cache/
+.cache/
+.turbo/
+.vite/
+
+# Test coverage
+coverage/
+
+# Logs
+*.log
+
+# Editor and operating-system metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
