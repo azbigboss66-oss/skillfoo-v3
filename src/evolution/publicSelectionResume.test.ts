@@ -19,6 +19,37 @@ const CONTRACT_SHA256 = "c".repeat(64);
 const SELECT_SHA256 = "b".repeat(64);
 const FINGERPRINT = "f".repeat(24);
 
+const providerRole = {
+  requestTimeoutMs: 120_000,
+  maxOutputTokensBehavior: "provider-default",
+  configFingerprint: FINGERPRINT,
+} as const;
+
+const adaptiveProviderIdentity = {
+  adapterVersion: "openai-chat-completions-v1",
+  name: "openai-compatible",
+  endpointIdentity: "e".repeat(24),
+  model: "deepseek-test",
+  authMode: "bearer",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
+  roles: {
+    evaluator: providerRole,
+    mutation: providerRole,
+    repair: providerRole,
+    semanticJudge: providerRole,
+  },
+} as const;
+
+const publicProviderIdentity = {
+  ...adaptiveProviderIdentity,
+  roles: { evaluator: providerRole, semanticJudge: providerRole },
+} as const;
+
 test("all Adaptive stop reasons share one comparison-or-failure disposition table", () => {
   const dispositionOf = (
     publicSelectionResumeModule as unknown as {
@@ -181,7 +212,7 @@ function currentAdaptiveArtifact() {
     publicContract: { version: "v3" },
     adaptiveBudget,
     liveRun: {
-      provider: { name: "deepseek", model: "deepseek-test", configFingerprint: FINGERPRINT },
+      provider: adaptiveProviderIdentity,
       authorizedBudget: { maxLogicalCalls: adaptiveBudget.envelope.authorizedLogicalCalls },
       callEnvelope: adaptiveBudget.envelope,
       providerTokenTelemetry: tokenTelemetry("adaptive", 2),
@@ -215,8 +246,7 @@ function resumeBindings(raw: string) {
     s0SkillMd: S0,
     publicContract: { version: "v3" as const },
     confirmationMode: "human" as const,
-    providerModel: "deepseek-test",
-    acceptedEvaluatorConfigFingerprints: [FINGERPRINT],
+    providerIdentity: adaptiveProviderIdentity,
     expectedU1Intake: {
       track: "b0-repair" as const,
       b0EvidenceSha256: sha256Hex(B0),
@@ -270,12 +300,7 @@ function currentPublicFailure() {
     providerTokenTelemetry: tokenTelemetry("public-select"),
     actualApplicationRecoveryAttempts: 0,
     structureRecoveryDiagnostics: [],
-    provider: {
-      name: "deepseek",
-      model: "deepseek-test",
-      evaluatorConfigFingerprint: FINGERPRINT,
-      semanticJudgeConfigFingerprint: FINGERPRINT,
-    },
+    provider: publicProviderIdentity,
     confirmationMode: "human",
     explorationOnly: false,
     humanConfirmationBypassed: false,
@@ -364,12 +389,7 @@ function currentPublicResult() {
       envelope,
     },
     accounting: { logicalCalls: 2, httpAttempts: 2, retryAttempts: 0 },
-    provider: {
-      name: "deepseek",
-      model: "deepseek-test",
-      evaluatorConfigFingerprint: FINGERPRINT,
-      semanticJudgeConfigFingerprint: FINGERPRINT,
-    },
+    provider: publicProviderIdentity,
     applicationRecovery,
     actualApplicationRecoveryAttempts: 0,
     structureRecoveryDiagnostics: [],
@@ -513,7 +533,7 @@ test("current public-select failure requires one bounded stage repair and exact 
     {
       contractSha256: CONTRACT_SHA256,
       selectItemsSha256: SELECT_SHA256,
-      providerModel: "deepseek-test",
+      providerIdentity: publicProviderIdentity,
       confirmationMode: "human",
     },
   ));
@@ -537,7 +557,7 @@ test("current public-select failure requires one bounded stage repair and exact 
     () => validatePublicSelectionFailureForResume(JSON.stringify(failure), failure.adaptiveResultSha256, {
       contractSha256: "0".repeat(64),
       selectItemsSha256: SELECT_SHA256,
-      providerModel: "deepseek-test",
+      providerIdentity: publicProviderIdentity,
       confirmationMode: "human",
     }),
     /IDENTITY_DRIFT/,

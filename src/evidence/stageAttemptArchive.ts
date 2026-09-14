@@ -13,6 +13,7 @@ import { z } from "zod";
 import {
   LiveCalibrationEvidenceSchema,
   LiveCalibrationFailureEvidenceSchema,
+  OpenAICompatibleProviderIdentitySchema,
   SEMANTIC_RESPONSE_BINDING_VERSION,
 } from "../types.js";
 
@@ -606,6 +607,11 @@ function validateAccountingSourceShape(snapshot: SourceSnapshot): void {
   }
   const accounting = nestedObject(raw, "accounting");
   const safeError = nestedObject(raw, "safeError");
+  const liveRun = nestedObject(raw, "liveRun");
+  const stageProvider = nestedObject(raw, "provider");
+  const liveProvider = liveRun === null ? null : nestedObject(liveRun, "provider");
+  const stageProviderValid = stageProvider !== null && OpenAICompatibleProviderIdentitySchema.safeParse(stageProvider).success;
+  const liveProviderValid = liveProvider !== null && OpenAICompatibleProviderIdentitySchema.safeParse(liveProvider).success;
   const objectKeysPresent = (...keys: string[]): boolean => keys.every((key) => nestedObject(raw, key) !== null);
   const hashKeysValid = (...keys: string[]): boolean => keys.every(
     (key) => typeof raw[key] === "string" && SHA256_RE.test(raw[key] as string),
@@ -621,21 +627,23 @@ function validateAccountingSourceShape(snapshot: SourceSnapshot): void {
       Array.isArray(raw.candidates) && raw.candidates.length >= 2 &&
       objectKeysPresent("population", "accounting", "u1Intake", "publicContract", "liveRun", "evidence") &&
       Array.isArray(raw.generations) && Array.isArray(raw.pinnedItemIds) &&
+      liveProviderValid &&
       events.filter((event) => event.type === "run_start").length === 1;
   } else if (snapshot.basename === "adaptive-failure.json") {
     knownShape = raw.schemaVersion === 1 && status === "failed" && raw.phase === "adaptive-run" &&
       safeError !== null && Array.isArray(raw.events) &&
-      objectKeysPresent("accounting", "liveRun", "evidence");
+      objectKeysPresent("accounting", "liveRun", "evidence") && liveProviderValid;
   } else if (snapshot.basename === "public-selection-result.json") {
     knownShape = raw.schemaVersion === 2 &&
       status === "completed" && raw.phase === "public-select" &&
       hashKeysValid("contractSha256", "selectItemsSha256", "adaptiveResultSha256") &&
       objectKeysPresent("selection", "budget", "accounting", "provider") &&
+      stageProviderValid &&
       currentStageRecoveryEvidenceValid(raw, "public-select", true);
   } else if (snapshot.basename === "public-selection-failure.json") {
     knownShape = raw.schemaVersion === 1 && status === "failed" && raw.phase === "public-select" &&
       hashKeysValid("contractSha256", "selectItemsSha256", "adaptiveResultSha256") &&
-      safeError !== null && currentStageRecoveryEvidenceValid(raw, "public-select", false);
+      safeError !== null && stageProviderValid && currentStageRecoveryEvidenceValid(raw, "public-select", false);
   } else if (snapshot.basename === "direct-result.json") {
     const isScored = nestedObject(raw, "comparison") !== null;
     const isCapabilityRejected = raw.directCandidateOutcome === "rejected_by_capability_gate" &&
@@ -650,10 +658,11 @@ function validateAccountingSourceShape(snapshot: SourceSnapshot): void {
         "directInstructionSha256",
       ) && (isScored || isCapabilityRejected) &&
       objectKeysPresent("budget", "accounting", "parallelism", "provider", "promptBoundary") &&
+      stageProviderValid &&
       currentStageRecoveryEvidenceValid(raw, "direct", true);
   } else if (snapshot.basename === "direct-failure.json") {
     knownShape = raw.schemaVersion === 1 && status === "failed" && raw.phase === "direct-public-select" &&
-      safeError !== null && accounting !== null && currentStageRecoveryEvidenceValid(raw, "direct", false);
+      safeError !== null && accounting !== null && stageProviderValid && currentStageRecoveryEvidenceValid(raw, "direct", false);
   }
   if (!knownShape) throw new StageAttemptArchiveError("STAGE_ATTEMPT_ARCHIVE_ARTIFACT_INVALID");
 }

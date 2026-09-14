@@ -13,6 +13,7 @@ import { RepairFrontierError } from "./repairFrontier.js";
 import { sampleTaskCard } from "../evalFactory/composeBlueprint.test.js";
 import { frozenSampleContract } from "../bootstrap/runBootstrap.test.js";
 import type { FrontierTicket } from "../types.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── P1 任务 3：显式输出上限的可验证契约 ─────────────────────────
 //
@@ -24,10 +25,18 @@ import type { FrontierTicket } from "../types.js";
 
 const EXPLICIT_MAX_OUTPUT_TOKENS = 3000;
 
-const FAKE_CONFIG = {
+const FAKE_CONFIG: LlmConfig = {
   apiKey: "test-key",
+  authMode: "bearer",
   baseUrl: "https://api.deepseek.com",
+  endpoint: "https://api.deepseek.com/chat/completions",
   model: "deepseek-v4-flash",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
 };
 
 interface CapturedRequest {

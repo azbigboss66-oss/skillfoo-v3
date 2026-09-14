@@ -637,7 +637,7 @@ test("mutation recovery: bad primary and valid recovery use different cache iden
       skillSnapshotSha256: "-",
       mode: "live",
       maxOutputTokensBehavior: 16384,
-      thinkingMode: "disabled",
+      reasoningMode: "thinking-disabled",
       temperatureBehavior: "provider-default",
       frozenEvidenceSha256: "-",
       stage: "adaptive",

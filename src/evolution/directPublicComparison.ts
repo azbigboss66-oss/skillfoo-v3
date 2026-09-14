@@ -5,6 +5,7 @@ import {
   calculateStageBudgets,
 } from "../providers/stageBudgets.js";
 import {
+  OpenAICompatibleProviderIdentitySchema,
   SEMANTIC_RESPONSE_BINDING_VERSION,
   U1_SCORING_PROFILE_VERSION,
   U1ScoringIdentitySchema,
@@ -449,13 +450,7 @@ const ScoredDirectResultArtifactSchema = z.object({
     misses: NonNegativeIntegerSchema,
     stores: NonNegativeIntegerSchema,
   }).strict(),
-  provider: z.object({
-    name: z.literal("deepseek"),
-    model: z.string().min(1),
-    evaluatorConfigFingerprint: z.string().regex(/^[a-f0-9]{24}$/),
-    proposerConfigFingerprint: z.string().regex(/^[a-f0-9]{24}$/),
-    semanticJudgeConfigFingerprint: z.string().regex(/^[a-f0-9]{24}$/),
-  }).strict(),
+  provider: OpenAICompatibleProviderIdentitySchema,
   promptBoundary: z.object({
     inputs: z.tuple([
       z.enum(["b0", "s0"]),
@@ -770,6 +765,7 @@ export const DirectFailureArtifactSchema = z.object({
     retryAttempts: NonNegativeIntegerSchema,
   }).strict(),
   tokenTelemetry: ProviderTokenTelemetryEvidenceSchema,
+  provider: OpenAICompatibleProviderIdentitySchema,
   dynamicEnvelopeExhaustion: DynamicEnvelopeExhaustionEvidenceSchema.optional(),
   applicationRecovery: z.array(ApplicationRecoverySafeSummarySchema).optional(),
   actualApplicationRecoveryAttempts: NonNegativeIntegerSchema,

@@ -23,6 +23,31 @@ const CASES = [
 const TASK_HASH = "d".repeat(64);
 const REVIEW_HASH = "e".repeat(64);
 
+const providerRole = (role: "evaluator" | "mutation" | "repair" | "directRefine" | "semanticJudge") => ({
+  requestTimeoutMs: role === "mutation" || role === "repair" || role === "directRefine" ? 180_000 : 120_000,
+  maxOutputTokensBehavior: "provider-default" as const,
+  configFingerprint: "a".repeat(24),
+});
+
+function providerIdentity(
+  roles: readonly ("evaluator" | "mutation" | "repair" | "directRefine" | "semanticJudge")[],
+) {
+  return {
+    adapterVersion: "openai-chat-completions-v1" as const,
+    name: "openai-compatible" as const,
+    endpointIdentity: "9".repeat(24),
+    model: "deepseek-v4-flash",
+    authMode: "bearer" as const,
+    requestProfile: {
+      preset: "deepseek" as const,
+      jsonMode: "json_object" as const,
+      reasoningMode: "thinking-disabled" as const,
+      maxTokensField: "max_tokens" as const,
+    },
+    roles: Object.fromEntries(roles.map((role) => [role, providerRole(role)])),
+  };
+}
+
 function scoringIdentity(contractSha256: string) {
   return {
     contractSha256,
@@ -74,7 +99,7 @@ function calibrationEvidence(contractSha256: string) {
     status: "passed",
     contractSha256,
     calibrationTripletSha256: "f".repeat(64),
-    provider: { name: "deepseek", model: "deepseek-v4-flash", configFingerprint: "1".repeat(24) },
+    provider: providerIdentity(["semanticJudge"]),
     confirmationMode: "human",
     explorationOnly: false,
     humanConfirmationBypassed: false,
@@ -231,12 +256,7 @@ function publicSelectionArtifact(entry: typeof CASES[number], retainedQualifiedC
       httpAttempts: candidates.length * itemIds.length,
       retryAttempts: 0,
     },
-    provider: {
-      name: "deepseek",
-      model: "deepseek-v4-flash",
-      evaluatorConfigFingerprint: "a".repeat(24),
-      semanticJudgeConfigFingerprint: "a".repeat(24),
-    },
+    provider: providerIdentity(["evaluator", "semanticJudge"]),
     applicationRecovery,
     actualApplicationRecoveryAttempts: 0,
     structureRecoveryDiagnostics: [],
@@ -324,7 +344,10 @@ async function writeFormalCase(root: string, entry: typeof CASES[number]): Promi
         existingRecoveryReserve: 4,
       },
     },
-    liveRun: { providerTokenTelemetry: providerTokens(20) },
+    liveRun: {
+      provider: providerIdentity(["evaluator", "mutation", "repair", "semanticJudge"]),
+      providerTokenTelemetry: providerTokens(20),
+    },
   }), "utf8");
   const publicArtifact = PublicSelectionResultArtifactSchema.parse(publicSelectionArtifact(entry));
   await writeFile(
@@ -349,6 +372,7 @@ async function writeFormalCase(root: string, entry: typeof CASES[number]): Promi
     actualApplicationRecoveryAttempts: 0,
     structureRecoveryDiagnostics: [],
     tokenTelemetry: providerTokens(4),
+    provider: providerIdentity(["evaluator", "directRefine", "semanticJudge"]),
     confirmationMode: "human",
     humanConfirmationBypassed: false,
     formalEvidence: true,
@@ -423,27 +447,8 @@ test("rejects a current formal case whose public evidence drifts to a retired sc
   try {
     await writeCurrentSuite(root);
     const path = join(root, "low", "formal-evidence", "adaptive", "public-selection-result.json");
-    const drifted = {
-      schemaVersion: 2,
-      semanticResponseBindingVersion: SEMANTIC_RESPONSE_BINDING_VERSION,
-      status: "completed",
-      phase: "public-select",
-      contractSha256: CASES[0].contractSha256,
-      selection: {
-        scoringIdentity: {
-          ...scoringIdentity(CASES[0].contractSha256),
-          profileVersion: "u1-scoring-profile-v2",
-        },
-        decision: { verdict: "start_reference_retained" },
-      },
-      budget: stageBudget(2),
-      accounting: { logicalCalls: 1, httpAttempts: 1, retryAttempts: 0 },
-      actualApplicationRecoveryAttempts: 0,
-      structureRecoveryDiagnostics: [],
-      confirmationMode: "human",
-      humanConfirmationBypassed: false,
-      formalEvidence: true,
-    };
+    const drifted = structuredClone(publicSelectionArtifact(CASES[0])) as any;
+    drifted.selection.scoringIdentity.profileVersion = "u1-scoring-profile-v2";
     await writeFile(path, JSON.stringify(drifted), "utf8");
     await assert.rejects(
       aggregateU1TechnicalSuiteReport({ suiteDir: root }),

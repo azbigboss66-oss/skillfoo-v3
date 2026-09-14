@@ -1,8 +1,9 @@
 // ── P0 Task 1: live-run authorization and budget policy ──────────
 //
-// The single gate between "offline by default" and "one real
-// OpenAI-compatible provider call". Real mode exists ONLY for
-// provider=deepseek and ONLY when the operator passes every gate:
+// The single gate between "offline by default" and one real
+// OpenAI-compatible provider call. Real mode exists only when the operator
+// selects the portable provider path (or its DeepSeek request preset) and
+// passes every gate:
 // --allow-network, the exact confirmation phrase, --no-release, and the
 // centrally calculated current-U1 authorization. All errors are desensitized by construction —
 // field names and ranges only, never keys, prompts, or URLs.
@@ -26,11 +27,11 @@ export const LIVE_BUDGET_RANGES = {
 export const LIVE_ROLE_RANGES = {
   evaluator: {
     maxOutputTokens: { min: 512, max: 4_096 },
-    requestTimeoutMs: { min: 1_000, max: 180_000 },
+    requestTimeoutMs: { min: 1_000, max: 2_147_483_647 },
   },
   proposer: {
     maxOutputTokens: { min: 1_024, max: 16_384 },
-    requestTimeoutMs: { min: 1_000, max: 180_000 },
+    requestTimeoutMs: { min: 1_000, max: 2_147_483_647 },
   },
 } as const;
 
@@ -59,23 +60,6 @@ export function maxOutputTokensBehaviorOf(output: LiveRoleOutput): number | "pro
 export type LiveRoleOutputSource =
   | "explicit-role-params"
   | "u1-provider-default-tokens";
-
-/**
- * Honest role-scoped thinking declaration. Every live role in this pipeline
- * must return a strict JSON envelope, so each one explicitly disables thinking.
- * This prevents a valid 2xx response from consuming the whole completion as
- * reasoning while leaving the required final document empty.
- */
-export const LIVE_THINKING_MODE = {
-  setting: "role-scoped",
-  declared:
-    "role-scoped: evaluator, semantic-judge, mutation, repair and direct-refine send thinking disabled for strict-JSON outputs; empty or truncated final content still fails closed",
-} as const;
-
-/** Request-level DeepSeek thinking override for one concrete live role. */
-export function thinkingModeOf(_role: LiveProviderRole): "disabled" {
-  return "disabled";
-}
 
 export class LiveRunPolicyError extends Error {
   constructor(
@@ -108,7 +92,9 @@ export interface LiveRunPolicyInput {
 /** Immutable, fully-authorized live-run policy. */
 export interface LiveRunPolicy {
   readonly mode: "live";
-  readonly providerName: "deepseek";
+  readonly providerName: "openai-compatible";
+  /** `deepseek` changes request defaults only; execution remains one provider path. */
+  readonly requestPreset: "portable" | "deepseek";
   readonly maxLogicalCalls: number;
   readonly maxRetryAttempts: number;
   /** Present only when this stage is governed by the current-U1 dynamic envelope. */
@@ -119,8 +105,6 @@ export interface LiveRunPolicy {
   readonly proposer: LiveRoleOutput;
   /** How the two groups were sourced. */
   readonly roleOutputSource: LiveRoleOutputSource;
-  /** Honest role-scoped thinking-mode declaration. */
-  readonly thinkingMode: { readonly setting: "role-scoped"; readonly declared: string };
   readonly noRelease: true;
 }
 
@@ -141,10 +125,10 @@ export function roleGroupOf(policy: LiveRunPolicy, role: LiveProviderRole): Live
  */
 export function parseLiveRunPolicy(input: LiveRunPolicyInput): LiveRunPolicy {
   const provider = normalizeProvider(input.provider);
-  if (provider !== "deepseek") {
+  if (provider !== "openai-compatible" && provider !== "deepseek") {
     throw new LiveRunPolicyError(
       "LIVE_PROVIDER_UNSUPPORTED",
-      `LIVE_PROVIDER_UNSUPPORTED: real mode supports the OpenAI-compatible provider "deepseek" only (got "${input.provider}"); other vendors are NOT claimed as supported`,
+      `LIVE_PROVIDER_UNSUPPORTED: real mode supports "openai-compatible" and the "deepseek" request preset only (got "${input.provider}")`,
     );
   }
   if (input.allowNetwork !== true) {
@@ -206,7 +190,7 @@ export function parseLiveRunPolicy(input: LiveRunPolicyInput): LiveRunPolicy {
   }
   for (const [role, value] of [["evaluator", evaluatorTimeout], ["proposer", proposerTimeout]] as const) {
     const range = LIVE_ROLE_RANGES[role].requestTimeoutMs;
-    if (!Number.isFinite(value) || value < range.min || value > range.max) {
+    if (!Number.isSafeInteger(value) || value < range.min || value > range.max) {
       throw new LiveRunPolicyError(
         "LIVE_ROLE_OUT_OF_RANGE",
         `LIVE_ROLE_OUT_OF_RANGE: ${role}RequestTimeoutMs must be between ${range.min} and ${range.max} (got ${value})`,
@@ -233,7 +217,7 @@ export function parseLiveRunPolicy(input: LiveRunPolicyInput): LiveRunPolicy {
   } else {
     for (const [role, value] of [["evaluator", evaluatorTokens], ["proposer", proposerTokens]] as const) {
       const range = LIVE_ROLE_RANGES[role].maxOutputTokens;
-      if (!Number.isFinite(value) || value < range.min || value > range.max) {
+      if (!Number.isSafeInteger(value) || value < range.min || value > range.max) {
         throw new LiveRunPolicyError(
           "LIVE_ROLE_OUT_OF_RANGE",
           `LIVE_ROLE_OUT_OF_RANGE: ${role}MaxOutputTokens must be between ${range.min} and ${range.max} (got ${value})`,
@@ -253,14 +237,14 @@ export function parseLiveRunPolicy(input: LiveRunPolicyInput): LiveRunPolicy {
 
   return Object.freeze({
     mode: "live",
-    providerName: "deepseek",
+    providerName: "openai-compatible",
+    requestPreset: provider === "deepseek" ? "deepseek" : "portable",
     maxLogicalCalls,
     maxRetryAttempts,
     ...(input.u1CallEnvelope ? { u1CallEnvelope: Object.freeze({ ...input.u1CallEnvelope }) } : {}),
     evaluator,
     proposer,
     roleOutputSource,
-    thinkingMode: { setting: LIVE_THINKING_MODE.setting, declared: LIVE_THINKING_MODE.declared },
     noRelease: true,
   } satisfies LiveRunPolicy);
 }

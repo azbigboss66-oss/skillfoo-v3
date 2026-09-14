@@ -176,7 +176,25 @@ test("a structured proposer_failure writes one redacted Adaptive failure and can
     outDir,
     result,
     liveRun: {
-      provider: { name: "deepseek", model: "deepseek-v4-flash", configFingerprint: "f".repeat(24) },
+      provider: {
+        adapterVersion: "openai-chat-completions-v1",
+        name: "openai-compatible",
+        endpointIdentity: "e".repeat(24),
+        model: "deepseek-v4-flash",
+        authMode: "bearer",
+        requestProfile: {
+          preset: "deepseek",
+          jsonMode: "json_object",
+          reasoningMode: "thinking-disabled",
+          maxTokensField: "max_tokens",
+        },
+        roles: {
+          evaluator: { requestTimeoutMs: 120_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "a".repeat(24) },
+          mutation: { requestTimeoutMs: 180_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "b".repeat(24) },
+          repair: { requestTimeoutMs: 180_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "c".repeat(24) },
+          semanticJudge: { requestTimeoutMs: 120_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "d".repeat(24) },
+        },
+      },
       authorizedBudget: { maxLogicalCalls: adaptiveBudget.envelope.authorizedLogicalCalls, maxRetryAttempts: 2 },
       callEnvelope: adaptiveBudget.envelope,
       providerTokenTelemetry,

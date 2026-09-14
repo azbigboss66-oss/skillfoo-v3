@@ -25,7 +25,17 @@ export interface ProviderCacheKeyMaterial {
   role: string;
   responseFormat: "json_object" | "provider-default" | "not-applicable";
   maxOutputTokensBehavior: number | "provider-default" | "not-applicable";
-  thinkingMode: "enabled" | "disabled" | "provider-default" | "not-applicable";
+  reasoningMode:
+    | "provider-default"
+    | "thinking-enabled"
+    | "thinking-disabled"
+    | "effort-none"
+    | "effort-minimal"
+    | "effort-low"
+    | "effort-medium"
+    | "effort-high"
+    | "effort-xhigh"
+    | "not-applicable";
   temperatureBehavior: number | "provider-default" | "not-applicable";
   frozenEvidenceSha256: string;
   stage: string;
@@ -49,7 +59,7 @@ export function providerCacheKeyOf(material: ProviderCacheKeyMaterial): string {
     material.role,
     material.responseFormat,
     String(material.maxOutputTokensBehavior),
-    material.thinkingMode,
+    material.reasoningMode,
     String(material.temperatureBehavior),
     material.frozenEvidenceSha256,
     material.stage,

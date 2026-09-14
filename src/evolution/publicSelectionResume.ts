@@ -2,10 +2,12 @@ import { z } from "zod";
 import { stableStringify } from "../intake/taskCard.js";
 import { sha256Hex } from "../runtime/capabilityAdapter.js";
 import {
+  OpenAICompatibleProviderIdentitySchema,
   ProviderTokenTelemetryEvidenceSchema,
   SEMANTIC_RESPONSE_BINDING_VERSION,
   U1_SCORING_PROFILE_VERSION,
   U1ScoringIdentitySchema,
+  type OpenAICompatibleProviderIdentity,
 } from "../types.js";
 export { ProviderTokenTelemetryEvidenceSchema } from "../types.js";
 import {
@@ -22,7 +24,6 @@ import {
 import { projectU1ChampionEligibility } from "../evaluation/u1Rubric.js";
 
 const Sha256Schema = z.string().regex(/^[a-f0-9]{64}$/);
-const ProviderFingerprintSchema = z.string().regex(/^[a-f0-9]{24}$/);
 
 export const ADAPTIVE_STOP_DISPOSITIONS = Object.freeze({
   public_goal_met: "comparison",
@@ -670,11 +671,7 @@ const AdaptiveResumeArtifactSchema = z.object({
   publicContract: z.object({ version: z.literal("v3") }).passthrough(),
   adaptiveBudget: AdaptiveBudgetPlanEvidenceSchema,
   liveRun: z.object({
-    provider: z.object({
-      name: z.literal("deepseek"),
-      model: z.string().min(1),
-      configFingerprint: ProviderFingerprintSchema,
-    }).passthrough(),
+    provider: OpenAICompatibleProviderIdentitySchema,
     authorizedBudget: z.object({
       maxLogicalCalls: z.number().int().min(1),
     }).passthrough(),
@@ -829,6 +826,7 @@ export const AdaptiveFailureArtifactSchema = z.object({
   actualApplicationRecoveryAttempts: z.number().int().min(0),
   structureRecoveryDiagnostics: z.array(AdaptiveStructureRecoveryDiagnosticEvidenceSchema),
   liveRun: z.object({
+    provider: OpenAICompatibleProviderIdentitySchema,
     authorizedBudget: z.object({ maxLogicalCalls: z.number().int().min(1) }).passthrough(),
     callEnvelope: CallEnvelopeEvidenceSchema,
     providerTokenTelemetry: ProviderTokenTelemetryEvidenceSchema,
@@ -950,8 +948,7 @@ export interface PublicSelectionResumeBindings {
   s0SkillMd: string;
   publicContract: { version: "v3"; sha256?: string };
   confirmationMode: "human";
-  providerModel: string;
-  acceptedEvaluatorConfigFingerprints: readonly string[];
+  providerIdentity: OpenAICompatibleProviderIdentity;
   expectedU1Intake: {
     track: "b0-repair" | "s0-rebuild";
     b0EvidenceSha256: string;
@@ -1118,10 +1115,7 @@ export function validateAdaptiveResultForPublicSelectResume(
   if (!evidenceMatches) {
     resumeFail("RESUME_ADAPTIVE_EVIDENCE_DRIFT", "the Adaptive evidence mode is inconsistent with the current human-confirmation gate mode");
   }
-  if (
-    artifact.liveRun.provider.model !== bindings.providerModel ||
-    !bindings.acceptedEvaluatorConfigFingerprints.includes(artifact.liveRun.provider.configFingerprint)
-  ) {
+  if (stableStringify(artifact.liveRun.provider) !== stableStringify(bindings.providerIdentity)) {
     resumeFail("RESUME_ADAPTIVE_PROVIDER_DRIFT", "the current evaluator provider configuration differs from the Adaptive evidence");
   }
 
@@ -1157,12 +1151,7 @@ export const PublicSelectionFailureArtifactSchema = z.object({
   providerTokenTelemetry: ProviderTokenTelemetryEvidenceSchema,
   actualApplicationRecoveryAttempts: z.number().int().min(0),
   structureRecoveryDiagnostics: z.array(PublicSelectionStructureRecoveryDiagnosticEvidenceSchema),
-  provider: z.object({
-    name: z.literal("deepseek"),
-    model: z.string().min(1),
-    evaluatorConfigFingerprint: ProviderFingerprintSchema,
-    semanticJudgeConfigFingerprint: ProviderFingerprintSchema,
-  }).strict(),
+  provider: OpenAICompatibleProviderIdentitySchema,
   confirmationMode: z.literal("human"),
   explorationOnly: z.literal(false),
   humanConfirmationBypassed: z.literal(false),
@@ -1254,7 +1243,7 @@ export function validatePublicSelectionFailureForResume(
   expected: {
     contractSha256: string;
     selectItemsSha256: string;
-    providerModel: string;
+    providerIdentity: OpenAICompatibleProviderIdentity;
     confirmationMode: "human";
   },
 ): void {
@@ -1287,12 +1276,12 @@ export function validatePublicSelectionFailureForResume(
   if (
     parsed.data.contractSha256 !== expected.contractSha256 ||
     parsed.data.selectItemsSha256 !== expected.selectItemsSha256 ||
-    parsed.data.provider?.model !== expected.providerModel ||
+    stableStringify(parsed.data.provider) !== stableStringify(expected.providerIdentity) ||
     parsed.data.confirmationMode !== expected.confirmationMode
   ) {
     resumeFail(
       "RESUME_PUBLIC_SELECTION_FAILURE_IDENTITY_DRIFT",
-      "public-selection failure contract, split, model, or confirmation identity drifted",
+      "public-selection failure contract, split, provider configuration, or confirmation identity drifted",
     );
   }
 }
@@ -1500,12 +1489,7 @@ export const PublicSelectionResultArtifactSchema = z.object({
     httpAttempts: z.number().int().min(0),
     retryAttempts: z.number().int().min(0),
   }).passthrough(),
-  provider: z.object({
-    name: z.literal("deepseek"),
-    model: z.string().min(1),
-    evaluatorConfigFingerprint: ProviderFingerprintSchema,
-    semanticJudgeConfigFingerprint: ProviderFingerprintSchema,
-  }),
+  provider: OpenAICompatibleProviderIdentitySchema,
   applicationRecovery: z.array(ApplicationRecoverySummarySchema),
   actualApplicationRecoveryAttempts: z.number().int().min(0),
   structureRecoveryDiagnostics: z.array(PublicSelectionStructureRecoveryDiagnosticEvidenceSchema),

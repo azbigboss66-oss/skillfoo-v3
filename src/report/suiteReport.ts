@@ -4,14 +4,21 @@ import {
   DEFAULT_U1_SCORING_PROFILE,
   LiveCalibrationEvidenceSchema,
   LiveCalibrationFailureEvidenceSchema,
+  OpenAICompatibleProviderIdentitySchema,
   SEMANTIC_RESPONSE_BINDING_VERSION,
+  type OpenAICompatibleProviderIdentity,
 } from "../types.js";
 import {
   DIRECT_U1_PROMPT_CONTRACT_SHA256,
   DIRECT_U1_PROMPT_CONTRACT_VERSION,
 } from "../evolution/directBaseline.js";
 import { calculateCalibrationBudget } from "../providers/stageBudgets.js";
-import { PublicSelectionResultArtifactSchema } from "../evolution/publicSelectionResume.js";
+import {
+  AdaptiveFailureArtifactSchema,
+  PublicSelectionFailureArtifactSchema,
+  PublicSelectionResultArtifactSchema,
+} from "../evolution/publicSelectionResume.js";
+import { openAICompatibleProviderIdentitiesCompatible } from "../providers/openaiCompatible.js";
 
 type JsonRecord = Record<string, unknown>;
 type StageStatus = "completed" | "failed" | "not_run";
@@ -63,6 +70,7 @@ export interface CurrentStageReport {
   cache: { hits: number; misses: number; stores: number } | null;
   budget: CurrentStageBudget | null;
   semanticRecovery: CurrentSemanticRecovery;
+  provider: OpenAICompatibleProviderIdentity | null;
 }
 
 export interface CurrentFormalCaseReport {
@@ -452,6 +460,17 @@ function errorCodeOf(raw: JsonRecord): string | null {
   return safeCode(raw.code) ?? safeCode(recordOf(raw.safeError)?.code);
 }
 
+function providerIdentityOf(raw: JsonRecord): OpenAICompatibleProviderIdentity | null {
+  const liveRun = recordOf(raw.liveRun);
+  const candidate = raw.provider ?? liveRun?.provider;
+  if (candidate === undefined) return null;
+  const parsed = OpenAICompatibleProviderIdentitySchema.safeParse(candidate);
+  if (!parsed.success) {
+    throw new Error("SUITE_REPORT_PROVIDER_IDENTITY_INVALID: stage evidence carries a malformed Provider identity");
+  }
+  return parsed.data;
+}
+
 function stageReport(args: {
   status: StageStatus;
   artifact: ArtifactChoice | null;
@@ -469,6 +488,7 @@ function stageReport(args: {
     cache: raw === null ? null : cacheOf(raw),
     budget: args.budget,
     semanticRecovery: args.recovery,
+    provider: raw === null ? null : providerIdentityOf(raw),
   };
 }
 
@@ -523,6 +543,9 @@ async function adaptiveStage(stageDir: string, caseId: string, contractSha256: s
   });
   if (artifact === null) return stageReport({ status: "not_run", artifact, budget: null, recovery: zeroRecovery() });
   const raw = artifact.raw;
+  if (artifact.name === "adaptive-failure.json" && !AdaptiveFailureArtifactSchema.safeParse(raw).success) {
+    throw new Error("SUITE_REPORT_ADAPTIVE_INVALID: Adaptive evidence fails the current result/failure schema");
+  }
   assertFormalFlags(raw, "SUITE_REPORT_ADAPTIVE_INVALID");
   if (raw.semanticResponseBindingVersion !== SEMANTIC_RESPONSE_BINDING_VERSION) {
     throw new Error("SUITE_REPORT_ADAPTIVE_INVALID: adaptive artifact uses a retired semantic response identity");
@@ -566,30 +589,30 @@ async function publicStage(stageDir: string, caseId: string, contractSha256: str
   };
   if (artifact === null) return { stage: stageReport({ status: "not_run", artifact, budget: null, recovery: zeroRecovery() }), decision: emptyDecision };
   const raw = artifact.raw;
-  assertFormalFlags(raw, "SUITE_REPORT_PUBLIC_SELECTION_INVALID");
-  if (
-    raw.schemaVersion !== 2 ||
-    raw.semanticResponseBindingVersion !== SEMANTIC_RESPONSE_BINDING_VERSION ||
-    raw.phase !== "public-select" ||
-    raw.contractSha256 !== contractSha256
-  ) {
-    throw new Error("SUITE_REPORT_PUBLIC_SELECTION_INVALID: public-select artifact is not the current schema for this contract");
+  const failed = artifact.name === "public-selection-failure.json";
+  if (!failed) {
+    const selection = recordOf(raw.selection);
+    assertCurrentScoringIdentity(selection?.scoringIdentity, contractSha256, "SUITE_REPORT_PUBLIC_SELECTION_INVALID");
   }
-  const selection = recordOf(raw.selection);
-  const identity = selection?.scoringIdentity ?? raw.scoringIdentity;
-  assertCurrentScoringIdentity(identity, contractSha256, "SUITE_REPORT_PUBLIC_SELECTION_INVALID");
+  const resultParse = failed ? null : PublicSelectionResultArtifactSchema.safeParse(raw);
+  const failureParse = failed ? PublicSelectionFailureArtifactSchema.safeParse(raw) : null;
+  if ((failed && !failureParse?.success) || (!failed && !resultParse?.success)) {
+    throw new Error(failed
+      ? "SUITE_REPORT_PUBLIC_SELECTION_INVALID: public-select failure artifact fails the current failure schema"
+      : "SUITE_REPORT_PUBLIC_SELECTION_INVALID: completed public-select result fails current relational validation");
+  }
+  assertFormalFlags(raw, "SUITE_REPORT_PUBLIC_SELECTION_INVALID");
+  if (raw.contractSha256 !== contractSha256) {
+    throw new Error("SUITE_REPORT_PUBLIC_SELECTION_INVALID: public-select artifact is bound to another contract");
+  }
   const budget = currentBudgetOf(raw, true, "SUITE_REPORT_PUBLIC_SELECTION_INVALID")!;
   const recovery = semanticRecoveryOf(raw, budget, "SUITE_REPORT_PUBLIC_SELECTION_INVALID");
   if (accountingOf(raw).logicalCalls > budget.authorizedLogicalCalls) {
     throw new Error("SUITE_REPORT_PUBLIC_SELECTION_INVALID: public-select accounting exceeds its independent budget");
   }
-  const failed = artifact.name === "public-selection-failure.json";
   if (failed) return { stage: stageReport({ status: "failed", artifact, budget, recovery }), decision: emptyDecision };
-  if (raw.status !== "completed") {
-    throw new Error("SUITE_REPORT_PUBLIC_SELECTION_INVALID: result artifact must be completed");
-  }
-  const currentArtifact = PublicSelectionResultArtifactSchema.safeParse(raw);
-  if (!currentArtifact.success) {
+  const currentArtifact = resultParse;
+  if (!currentArtifact?.success) {
     throw new Error("SUITE_REPORT_PUBLIC_SELECTION_INVALID: completed public-select result fails current relational validation");
   }
   const decision = currentArtifact.data.selection.decision;
@@ -625,6 +648,7 @@ async function directStage(stageDir: string, caseId: string, contractSha256: str
   const empty: CurrentFormalCaseReport["directComparison"] = { status: "not_run", relativeToStarting: null, scoreDelta: null };
   if (artifact === null) return { stage: stageReport({ status: "not_run", artifact, budget: null, recovery: zeroRecovery() }), comparison: empty };
   const raw = artifact.raw;
+  const failed = artifact.name === "direct-failure.json";
   assertFormalFlags(raw, "SUITE_REPORT_DIRECT_INVALID");
   if (
     raw.schemaVersion !== 1 ||
@@ -642,7 +666,6 @@ async function directStage(stageDir: string, caseId: string, contractSha256: str
   if (accountingOf(raw).logicalCalls > budget.authorizedLogicalCalls) {
     throw new Error("SUITE_REPORT_DIRECT_INVALID: Direct accounting exceeds its independent budget");
   }
-  const failed = artifact.name === "direct-failure.json";
   if (failed) {
     return {
       stage: stageReport({ status: "failed", artifact, budget, recovery }),
@@ -774,6 +797,18 @@ async function aggregateCase(suiteDir: string, binding: SuiteCaseBinding): Promi
     directStage(stageDir, binding.id, binding.contractSha256),
     sealedStage(stageDir, binding.id, binding.contractSha256),
   ]);
+  const providerEvidence = [
+    calibration.provider,
+    adaptive.provider,
+    publicResult.stage.provider,
+    directResult.stage.provider,
+    sealedResult.stage.provider,
+  ].filter((provider): provider is OpenAICompatibleProviderIdentity => provider !== null);
+  for (let index = 1; index < providerEvidence.length; index += 1) {
+    if (!openAICompatibleProviderIdentitiesCompatible(providerEvidence[0], providerEvidence[index])) {
+      throw new Error("SUITE_REPORT_PROVIDER_IDENTITY_DRIFT: stage Provider identities do not share one endpoint/model/wire profile");
+    }
+  }
   return {
     caseId: binding.id,
     order: binding.order,

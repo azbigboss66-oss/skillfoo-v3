@@ -10,6 +10,7 @@ import {
   providerCacheKeyOf,
   type ProviderCacheKeyMaterial,
 } from "./cache.js";
+import { normalizeChatCompletionsEndpoint, type LlmConfig } from "../config/llmConfig.js";
 
 // ── T09: provider response cache ─────────────────────────────────
 // The cache key must cover everything that can change a model's answer:
@@ -26,7 +27,7 @@ const BASE_MATERIAL: Omit<ProviderCacheKeyMaterial, "promptSha256" | "scenarioId
   skillSnapshotSha256: "aa".repeat(32),
   mode: "fixture",
   maxOutputTokensBehavior: 4096,
-  thinkingMode: "provider-default",
+  reasoningMode: "provider-default",
   temperatureBehavior: "provider-default",
   frozenEvidenceSha256: "ee".repeat(32),
   stage: "public-select",
@@ -79,7 +80,7 @@ test("a cache key covers every actual request and frozen-evidence behavior field
     { role: "semantic-judge" },
     { responseFormat: "provider-default" as const },
     { maxOutputTokensBehavior: 16384 },
-    { thinkingMode: "disabled" as const },
+    { reasoningMode: "thinking-disabled" as const },
     { temperatureBehavior: 0.7 },
     { frozenEvidenceSha256: "ff".repeat(32) },
     { stage: "sealed" },
@@ -309,10 +310,17 @@ test("the same scenario rerun for full public is fully served from the cache", a
 });
 
 test("OpenAICompatibleProvider.configFingerprint is deterministic, config-sensitive and key-free", () => {
-  const config = (baseUrl: string, model: string) => ({
+  const config = (baseUrl: string, model: string): LlmConfig => ({
     apiKey: "sk-secret-value",
-    baseUrl,
+    authMode: "bearer",
+    ...normalizeChatCompletionsEndpoint(baseUrl),
     model,
+    requestProfile: {
+      preset: "portable",
+      jsonMode: "omitted",
+      reasoningMode: "provider-default",
+      maxTokensField: "max_tokens",
+    },
   });
   const a = new OpenAICompatibleProvider(config("https://api.example.com/", "deepseek-chat"), 30_000);
   const aAgain = new OpenAICompatibleProvider(config("https://api.example.com", "deepseek-chat"), 30_000);

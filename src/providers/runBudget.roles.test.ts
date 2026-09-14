@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { OpenAICompatibleProvider, OpenAICompatibleProviderError } from "./openaiCompatible.js";
 import { createCachingProvider, createInMemoryResponseCache } from "./cache.js";
 import { createBudgetedProvider, ProviderBudgetError, RunCallBudget } from "./runBudget.js";
-import type { DeepSeekConfig } from "../config/deepseekConfig.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── P1 任务 2 Red→Green：按角色保留预算，不放宽总预算 ─────────────
 //
@@ -13,10 +13,18 @@ import type { DeepSeekConfig } from "../config/deepseekConfig.js";
 // direct-refine 的失败报告带角色；总 HTTP = logical + retry 恒成立；
 // 任何上限都没有被提高。
 
-const FAKE_CONFIG: DeepSeekConfig = {
+const FAKE_CONFIG: LlmConfig = {
   apiKey: "test-key",
+  authMode: "bearer",
   baseUrl: "https://api.deepseek.com",
+  endpoint: "https://api.deepseek.com/chat/completions",
   model: "deepseek-v4-flash",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
 };
 
 const NO_SLEEP = async () => {};
@@ -227,7 +235,7 @@ test("the caching wrapper bills logical calls under the role and cache hits stay
       skillSnapshotSha256: "-",
       mode: "live",
       maxOutputTokensBehavior: "provider-default",
-      thinkingMode: "provider-default",
+      reasoningMode: "provider-default",
       temperatureBehavior: "provider-default",
       frozenEvidenceSha256: "-",
       stage: "not-applicable",

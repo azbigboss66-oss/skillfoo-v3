@@ -17,7 +17,7 @@
 2. 用户确认 sealed-safe 中文评测摘要；
 3. 两次确认均以 `confirmationMode=human` 绑定其内容哈希；
 4. `humanConfirmationBypassed=false`；
-5. formal contract、runtime context、B0/S0、split、scoring identity 和模型配置均未漂移。
+5. formal contract、runtime context、B0/S0、split、scoring identity，以及 Provider 的 adapter version、endpoint identity、model、auth mode、request profile 和各角色运行指纹均未漂移。
 
 `test-fixture` 仅能在操作系统临时目录进行零网络自动化验证，不能形成 formal evidence，不能调用真实 Provider，也不能进入 sealed。生产 CLI 不提供 development bypass。
 
@@ -61,7 +61,9 @@ Calibration 有 2 个独立 primary pass，每个 pass 最多一次 schema repai
 
 候选场景和各阶段使用冻结执行图计算动态调用包络，默认 `callEnvelopeMultiplier=2.0`。阶段预算互相独立，不借用；达到授权上限即 fail closed。transport retry、candidate-item application retry 与 semantic schema repair 分别记账。
 
-U1 默认不发送 `max_tokens`，只观察 Provider 返回的 token usage。request timeout 继续生效；缺失 usage 记录为 unknown，不补零。
+U1 默认不发送 token ceiling 字段，只观察 Provider 返回的 token usage。只有操作员显式覆盖时，才按冻结 request profile 发送 `max_tokens` 或 `max_completion_tokens`。request timeout 继续生效；缺失 usage 记录为 unknown，不补零。
+
+Live 路径统一使用 OpenAI-compatible Chat Completions adapter；`bearer` 才发送 `Authorization` header，`none` 不发送，但两者都必须通过相同的网络、成本确认与 no-release 门禁。endpoint 只以不透明哈希进入持久化身份，密钥永不进入身份、缓存或结果产物。
 
 ## Sealed 与发布
 

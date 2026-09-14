@@ -7,9 +7,10 @@ import type {
   ProviderTokenUsageSample,
   ProviderUsageTags,
 } from "./types.js";
-import type { DeepSeekConfig } from "../config/deepseekConfig.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 import type { RunCallBudget } from "./runBudget.js";
 import { sha256Hex } from "../runtime/capabilityAdapter.js";
+import type { OpenAICompatibleProviderIdentity } from "../types.js";
 
 /**
  * Stable provider failure codes (P1 任务 1). Every 2xx anomaly gets a
@@ -17,6 +18,7 @@ import { sha256Hex } from "../runtime/capabilityAdapter.js";
  * HTTP 429/5xx) stay retryable.
  */
 export type OpenAICompatibleErrorCode =
+  | "PROVIDER_CONFIGURATION_INVALID"
   | "PROVIDER_NETWORK_ERROR"
   | "PROVIDER_TIMEOUT"
   | "PROVIDER_HTTP_ERROR"
@@ -80,7 +82,7 @@ export interface ProviderRetryOptions {
   budget?: RunCallBudget;
   /**
    * Per-response output ceiling forwarded as the Chat Completions
-   * `max_tokens` parameter. This is a per-response cap, NOT a total-run
+   * configured max-token field. This is a per-response cap, NOT a total-run
    * token budget — the run-level total is observed via token telemetry.
    */
   maxOutputTokens?: number;
@@ -97,12 +99,88 @@ export interface ProviderRetryOptions {
    * The configured model and explicit billing role remain authoritative.
    */
   usageTags?: Readonly<ProviderUsageTags>;
-  /**
-   * Optional DeepSeek thinking-mode override. Omit it to preserve the
-   * provider default; strict-JSON writer roles may explicitly disable it so
-   * the billed completion is the final document rather than reasoning only.
-   */
-  thinking?: "enabled" | "disabled";
+}
+
+export interface OpenAICompatibleSafeIdentity {
+  readonly name: "openai-compatible";
+  readonly endpointIdentity: string;
+  readonly model: string;
+  readonly authMode: "bearer" | "none";
+  readonly requestProfile: LlmConfig["requestProfile"];
+  readonly role: string;
+  readonly requestTimeoutMs: number;
+  readonly maxOutputTokensBehavior: number | "provider-default";
+  readonly configFingerprint: string;
+}
+
+const IDENTITY_ROLE_KEYS = {
+  evaluator: "evaluator",
+  mutation: "mutation",
+  repair: "repair",
+  "direct-refine": "directRefine",
+  "semantic-judge": "semanticJudge",
+} as const;
+
+/** Compose one strict, credential-free identity from the providers a stage actually uses. */
+export function openAICompatibleProviderIdentityOf(
+  providers: readonly OpenAICompatibleProvider[],
+): OpenAICompatibleProviderIdentity {
+  if (providers.length === 0) throw new Error("PROVIDER_IDENTITY_EMPTY: at least one live role is required");
+  const identities = providers.map((provider) => provider.safeIdentity());
+  const first = identities[0];
+  const common = (identity: OpenAICompatibleSafeIdentity): boolean =>
+    identity.endpointIdentity === first.endpointIdentity &&
+    identity.model === first.model &&
+    identity.authMode === first.authMode &&
+    JSON.stringify(identity.requestProfile) === JSON.stringify(first.requestProfile);
+  if (!identities.every(common)) {
+    throw new Error("PROVIDER_IDENTITY_MIXED: one stage cannot combine different endpoint/model/request profiles");
+  }
+  const roles: OpenAICompatibleProviderIdentity["roles"] = {};
+  for (const identity of identities) {
+    const key = IDENTITY_ROLE_KEYS[identity.role as keyof typeof IDENTITY_ROLE_KEYS];
+    if (!key) throw new Error(`PROVIDER_IDENTITY_ROLE_INVALID: unsupported live role ${identity.role}`);
+    if (roles[key]) throw new Error(`PROVIDER_IDENTITY_ROLE_DUPLICATE: duplicate live role ${identity.role}`);
+    roles[key] = {
+      requestTimeoutMs: identity.requestTimeoutMs,
+      maxOutputTokensBehavior: identity.maxOutputTokensBehavior,
+      configFingerprint: identity.configFingerprint,
+    };
+  }
+  return Object.freeze({
+    adapterVersion: "openai-chat-completions-v1",
+    name: "openai-compatible",
+    endpointIdentity: first.endpointIdentity,
+    model: first.model,
+    authMode: first.authMode,
+    requestProfile: Object.freeze({ ...first.requestProfile }),
+    roles: Object.freeze(roles),
+  });
+}
+
+/**
+ * Cross-stage compatibility for one endpoint/model/wire profile. Stages may
+ * use different role subsets, but any role present in both identities must
+ * retain exactly the same runtime parameters.
+ */
+export function openAICompatibleProviderIdentitiesCompatible(
+  left: OpenAICompatibleProviderIdentity,
+  right: OpenAICompatibleProviderIdentity,
+): boolean {
+  if (
+    left.adapterVersion !== right.adapterVersion ||
+    left.name !== right.name ||
+    left.endpointIdentity !== right.endpointIdentity ||
+    left.model !== right.model ||
+    left.authMode !== right.authMode ||
+    JSON.stringify(left.requestProfile) !== JSON.stringify(right.requestProfile)
+  ) return false;
+  for (const role of ["evaluator", "mutation", "repair", "directRefine", "semanticJudge"] as const) {
+    const leftRole = left.roles[role];
+    const rightRole = right.roles[role];
+    if (leftRole && rightRole && JSON.stringify(leftRole) !== JSON.stringify(rightRole)) return false;
+  }
+  return true;
 }
 
 /** Minimal subset of a Chat Completions response that this adapter reads. */
@@ -178,13 +256,12 @@ function diagnosticsOf(
 }
 
 /**
- * An OpenAI-compatible provider adapter that talks to a DeepSeek
+ * An OpenAI-compatible provider adapter that talks to one explicit
  * `/chat/completions` endpoint.
  *
- * - Receives an explicit {@link DeepSeekConfig} — does NOT read any environment
+ * - Receives an explicit {@link LlmConfig} — does NOT read any environment
  *   variable directly.
- * - Posts to `${baseUrl}/chat/completions` (baseUrl trailing slashes are stripped
- *   to prevent double slashes).
+ * - Posts to the normalized `/chat/completions` endpoint.
  * - When `options.responseFormat === "json_object"`, includes
  *   `response_format: { type: "json_object" }` in the request body.
  * - Returns `choices[0].message.content`.
@@ -193,9 +270,11 @@ function diagnosticsOf(
  *   the API key.
  */
 export class OpenAICompatibleProvider implements Provider {
-  private readonly apiKey: string;
-  private readonly baseUrl: string;
+  private readonly apiKey?: string;
+  private readonly authMode: "bearer" | "none";
+  private readonly endpoint: string;
   private readonly model: string;
+  private readonly requestProfile: LlmConfig["requestProfile"];
   private readonly requestTimeoutMs: number;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -203,12 +282,19 @@ export class OpenAICompatibleProvider implements Provider {
   private readonly maxOutputTokens?: number;
   private readonly role?: string;
   private readonly usageTags: Readonly<ProviderUsageTags>;
-  private readonly thinking?: "enabled" | "disabled";
 
-  constructor(config: DeepSeekConfig, requestTimeoutMs = 60_000, retry: ProviderRetryOptions = {}) {
+  constructor(config: LlmConfig, requestTimeoutMs = 60_000, retry: ProviderRetryOptions = {}) {
+    if (config.authMode === "bearer" && !config.apiKey?.trim()) {
+      throw new OpenAICompatibleProviderError(
+        "PROVIDER_CONFIGURATION_INVALID",
+        "PROVIDER_AUTH_CONFIGURATION_INVALID: bearer auth requires a configured credential.",
+      );
+    }
     this.apiKey = config.apiKey;
-    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.authMode = config.authMode;
+    this.endpoint = config.endpoint;
     this.model = config.model;
+    this.requestProfile = config.requestProfile;
     this.requestTimeoutMs = requestTimeoutMs;
     this.maxRetries = retry.maxRetries ?? 2;
     this.sleep = retry.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -220,24 +306,48 @@ export class OpenAICompatibleProvider implements Provider {
       role: retry.role ?? retry.usageTags?.role,
       model: config.model,
     });
-    this.thinking = retry.thinking;
   }
 
   /**
    * Desensitized provider-configuration fingerprint for cache keys: a hash
-   * of baseUrl + model + request timeout + max-output behavior + thinking mode. The API key NEVER participates —
+   * of the actual endpoint, model, auth mode, request profile, role, timeout
+   * and max-output behavior. The API key NEVER participates —
    * rotating a credential must not invalidate cached answers, and the
    * fingerprint must never leak the secret.
    */
   configFingerprint(): string {
     return sha256Hex(
-      `${this.baseUrl}\u0000${this.model}\u0000${this.requestTimeoutMs}\u0000${this.maxOutputTokens ?? "provider-default"}\u0000${this.thinking ?? "provider-default"}`,
+      JSON.stringify({
+        protocol: "openai-chat-completions-v1",
+        endpoint: this.endpoint,
+        model: this.model,
+        authMode: this.authMode,
+        requestProfile: this.requestProfile,
+        role: this.role ?? "unspecified",
+        requestTimeoutMs: this.requestTimeoutMs,
+        maxOutputTokensBehavior: this.maxOutputTokens ?? "provider-default",
+      }),
     ).slice(0, 24);
   }
 
   /** Safe base-URL identity for request/cache evidence; the URL itself is never returned. */
   endpointIdentity(): string {
-    return sha256Hex(this.baseUrl).slice(0, 24);
+    return sha256Hex(this.endpoint).slice(0, 24);
+  }
+
+  /** Complete safe identity for cache, artifact and resume bindings. */
+  safeIdentity(): OpenAICompatibleSafeIdentity {
+    return Object.freeze({
+      name: "openai-compatible",
+      endpointIdentity: this.endpointIdentity(),
+      model: this.model,
+      authMode: this.authMode,
+      requestProfile: Object.freeze({ ...this.requestProfile }),
+      role: this.role ?? "unspecified",
+      requestTimeoutMs: this.requestTimeoutMs,
+      maxOutputTokensBehavior: this.maxOutputTokens ?? "provider-default",
+      configFingerprint: this.configFingerprint(),
+    });
   }
 
   /**
@@ -295,31 +405,35 @@ export class OpenAICompatibleProvider implements Provider {
         `${code}: ${message}${this.role === undefined ? "" : ` [role=${this.role}]`}`,
         errorOptions,
       );
-    const url = `${this.baseUrl}/chat/completions`;
+    const url = this.endpoint;
 
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
     };
 
-    if (options?.responseFormat === "json_object") {
+    if (options?.responseFormat === "json_object" && this.requestProfile.jsonMode === "json_object") {
       body.response_format = { type: "json_object" };
     }
     if (options?.temperature !== undefined) {
       body.temperature = options.temperature;
     }
     if (this.maxOutputTokens !== undefined) {
-      body.max_tokens = this.maxOutputTokens;
+      body[this.requestProfile.maxTokensField] = this.maxOutputTokens;
     }
-    if (this.thinking !== undefined) {
-      body.thinking = { type: this.thinking };
+    if (this.requestProfile.reasoningMode === "thinking-enabled") {
+      body.thinking = { type: "enabled" };
+    } else if (this.requestProfile.reasoningMode === "thinking-disabled") {
+      body.thinking = { type: "disabled" };
+    } else if (this.requestProfile.reasoningMode.startsWith("effort-")) {
+      body.reasoning_effort = this.requestProfile.reasoningMode.slice("effort-".length);
     }
 
     const controller = new AbortController();
     const timeoutFailure = (): OpenAICompatibleProviderError =>
       fail(
         "PROVIDER_TIMEOUT",
-        `Request timed out after ${this.requestTimeoutMs}ms calling provider (deepseek).`,
+        `Request timed out after ${this.requestTimeoutMs}ms calling the OpenAI-compatible provider.`,
         { retryable: true },
       );
     let rejectTimeout!: (reason?: unknown) => void;
@@ -339,12 +453,11 @@ export class OpenAICompatibleProvider implements Provider {
     try {
       let res: Response;
       try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (this.authMode === "bearer") headers.Authorization = `Bearer ${this.apiKey!}`;
         res = await withinTimeout(fetch(url, {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${this.apiKey}`,
-          },
+          headers,
           body: JSON.stringify(body),
           signal: controller.signal,
         }));
@@ -355,7 +468,7 @@ export class OpenAICompatibleProvider implements Provider {
         }
         throw fail(
           "PROVIDER_NETWORK_ERROR",
-          `Network error calling provider (deepseek): ${errMsg(e)}`,
+          "Network error calling the OpenAI-compatible provider; transport details were withheld.",
           { retryable: true },
         );
       }
@@ -368,7 +481,7 @@ export class OpenAICompatibleProvider implements Provider {
         const retryable = res.status === 429 || res.status >= 500;
         throw fail(
           "PROVIDER_HTTP_ERROR",
-          `HTTP ${res.status} from provider (deepseek): ${safeSummary}`,
+          `HTTP ${res.status} from the OpenAI-compatible provider: ${safeSummary}`,
           { retryable, httpStatus: res.status },
         );
       }
@@ -383,7 +496,7 @@ export class OpenAICompatibleProvider implements Provider {
         }
         throw fail(
           "PROVIDER_NON_JSON_BODY",
-          "Provider (deepseek) returned HTTP 200 but the body is not valid JSON; refusing to guess a response.",
+          "The OpenAI-compatible provider returned HTTP 200 but the body is not valid JSON; refusing to guess a response.",
           { httpStatus: res.status },
         );
       }
@@ -401,7 +514,7 @@ export class OpenAICompatibleProvider implements Provider {
       if (!Array.isArray(data.choices) || data.choices.length === 0) {
         throw fail(
           "PROVIDER_NO_CHOICES",
-          `Provider (deepseek) returned HTTP 200 with no choices (choiceCount=${diagnostics.choiceCount}, finishReason=${diagnostics.finishReason ?? "absent"}, usagePresent=${diagnostics.usagePresent}).`,
+          `The OpenAI-compatible provider returned HTTP 200 with no choices (choiceCount=${diagnostics.choiceCount}, finishReason=${diagnostics.finishReason ?? "absent"}, usagePresent=${diagnostics.usagePresent}).`,
           { httpStatus: res.status, diagnostics },
         );
       }
@@ -410,7 +523,7 @@ export class OpenAICompatibleProvider implements Provider {
       if (typeof content !== "string") {
         throw fail(
           "PROVIDER_UNSUPPORTED_SCHEMA",
-          `Provider (deepseek) returned HTTP 200 but choices[0].message.content is ${content === undefined ? "absent" : `of type ${typeof content}`}; the adapter only reads string content and never substitutes reasoning_content.`,
+          `The OpenAI-compatible provider returned HTTP 200 but choices[0].message.content is ${content === undefined ? "absent" : `of type ${typeof content}`}; the adapter only reads string content and never substitutes reasoning_content.`,
           { httpStatus: res.status, diagnostics },
         );
       }
@@ -421,7 +534,7 @@ export class OpenAICompatibleProvider implements Provider {
       // deterministic for the identical request — no retry.
         throw fail(
         "PROVIDER_TRUNCATED_OUTPUT",
-        `Provider (deepseek) truncated the response at the max_tokens ceiling (finishReason=length, contentLength=${diagnostics.contentLength}); the strict full-replacement JSON contract cannot be satisfied by a truncated answer, so the call fails deterministically without retry. Raise the explicitly authorized max output tokens if the operator approves.`,
+        `The OpenAI-compatible provider truncated the response at the configured output-token ceiling (finishReason=length, contentLength=${diagnostics.contentLength}); the strict full-replacement JSON contract cannot be satisfied by a truncated answer, so the call fails deterministically without retry. Raise the explicitly authorized max output tokens if the operator approves.`,
         { httpStatus: res.status, diagnostics },
       );
       }
@@ -429,7 +542,7 @@ export class OpenAICompatibleProvider implements Provider {
       if (content.length === 0) {
         throw fail(
         "PROVIDER_EMPTY_RESPONSE",
-        `Provider (deepseek) returned HTTP 200 with empty content (finishReason=${diagnostics.finishReason ?? "absent"}, choiceCount=${diagnostics.choiceCount}, usagePresent=${diagnostics.usagePresent}, reasoningContentPresent=${diagnostics.reasoningContentPresent}); reasoning_content is never substituted for the answer.`,
+        `The OpenAI-compatible provider returned HTTP 200 with empty content (finishReason=${diagnostics.finishReason ?? "absent"}, choiceCount=${diagnostics.choiceCount}, usagePresent=${diagnostics.usagePresent}, reasoningContentPresent=${diagnostics.reasoningContentPresent}); reasoning_content is never substituted for the answer.`,
         { httpStatus: res.status, diagnostics },
       );
       }
@@ -450,11 +563,6 @@ export class OpenAICompatibleProvider implements Provider {
       clearTimeout(timeout);
     }
   }
-}
-
-/** Best-effort error-message extraction for unknown caught values. */
-function errMsg(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
 }
 
 /**

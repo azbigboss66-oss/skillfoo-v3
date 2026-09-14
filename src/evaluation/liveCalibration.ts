@@ -16,6 +16,7 @@ import {
   type EvaluationDraft,
   type LiveCalibrationEvidence,
   type LiveCalibrationPassEvidence,
+  type OpenAICompatibleProviderIdentity,
 } from "../types.js";
 import { createPublicSemanticBatchJudge, semanticResponseBindingVersion } from "./semanticJudge.js";
 import {
@@ -189,8 +190,7 @@ export function assertCalibrationEvidenceForAdaptive(
   expected: {
     contractSha256: string;
     calibrationTripletSha256: string;
-    model: string;
-    configFingerprint: string;
+    providerIdentity: OpenAICompatibleProviderIdentity;
     confirmationMode: "human";
   },
 ): LiveCalibrationEvidence {
@@ -218,8 +218,7 @@ export function assertCalibrationEvidenceForAdaptive(
     throw new CalibrationEvidenceError("CALIBRATION_CONTRACT_DRIFT", "the calibration evidence is bound to different frozen inputs");
   }
   if (
-    evidence.provider.model !== expected.model ||
-    evidence.provider.configFingerprint !== expected.configFingerprint
+    JSON.stringify(evidence.provider) !== JSON.stringify(expected.providerIdentity)
   ) {
     throw new CalibrationEvidenceError("CALIBRATION_PROVIDER_DRIFT", "the evaluator model configuration differs from the calibration evidence");
   }

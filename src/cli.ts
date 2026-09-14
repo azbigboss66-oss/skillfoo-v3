@@ -14,10 +14,12 @@ import {
 } from "./evidence/stageAttemptArchive.js";
 import { loadRuntimeEnv } from "./config/runtimeEnv.js";
 import {
-  getDeepSeekConfig as readDeepSeekConfig,
-  isDeepSeekConfigured as checkDeepSeekConfigured,
-  DeepSeekConfigError,
-} from "./config/deepseekConfig.js";
+  getLlmConfig as readLlmConfig,
+  isLlmConfigured as checkLlmConfigured,
+  LlmConfigError,
+  type LlmConfig,
+  type LlmRequestPreset,
+} from "./config/llmConfig.js";
 import { getAdapterDeclaration } from "./runtime/adapterRegistry.js";
 import {
   applyContractGates,
@@ -55,12 +57,14 @@ import {
   EvaluationReviewSchema,
   FrozenContractManifestSchema,
   LiveCalibrationEvidenceSchema,
+  OpenAICompatibleProviderIdentitySchema,
   SEMANTIC_RESPONSE_BINDING_VERSION,
   U1_SCORING_PROFILE_VERSION,
   U1ScoringIdentitySchema,
   type EvaluationContractV3,
   type EvaluationDraft,
   type EvaluationReviewConfirmation,
+  type OpenAICompatibleProviderIdentity,
   type RootFreeze,
   type TaskCard,
   type TaskCardConfirmation,
@@ -119,7 +123,12 @@ import {
   type U1ScenarioRole,
   type U1ScenarioRunnerFactory,
 } from "./runtime/u1ScenarioRunner.js";
-import { OpenAICompatibleProvider, OpenAICompatibleProviderError } from "./providers/openaiCompatible.js";
+import {
+  OpenAICompatibleProvider,
+  OpenAICompatibleProviderError,
+  openAICompatibleProviderIdentitiesCompatible,
+  openAICompatibleProviderIdentityOf,
+} from "./providers/openaiCompatible.js";
 import {
   RunCallBudget,
   ProviderBudgetError,
@@ -130,7 +139,7 @@ import {
   createInMemoryResponseCache,
   type ResponseCacheStats,
 } from "./providers/cache.js";
-import { parseLiveRunPolicy, maxHttpAttemptsOf, maxOutputTokensBehaviorOf, roleGroupOf, thinkingModeOf, LiveRunPolicyError, LIVE_CONFIRM_PHRASE, type LiveProviderRole, type LiveRunPolicy } from "./providers/liveRunPolicy.js";
+import { parseLiveRunPolicy, maxHttpAttemptsOf, maxOutputTokensBehaviorOf, roleGroupOf, LiveRunPolicyError, LIVE_CONFIRM_PHRASE, type LiveProviderRole, type LiveRunPolicy } from "./providers/liveRunPolicy.js";
 import { selectBootstrapSlice, type FunnelEvalItem, type FunnelEvent } from "./evolution/funnel.js";
 import { createOpenAICompatibleRepairProposer } from "./evolution/repairProposerProvider.js";
 import type { FrontierRepairProposer } from "./evolution/repairFrontier.js";
@@ -291,14 +300,18 @@ function ensureRuntimeEnvLoaded(): void {
   runtimeEnvLoaded = true;
 }
 
-function getDeepSeekConfig(): ReturnType<typeof readDeepSeekConfig> {
+function getLlmConfig(preset: LlmRequestPreset): LlmConfig {
   ensureRuntimeEnvLoaded();
-  return readDeepSeekConfig();
+  return readLlmConfig({ preset });
 }
 
-function isDeepSeekConfigured(): boolean {
+function isLlmConfigured(preset: LlmRequestPreset): boolean {
   ensureRuntimeEnvLoaded();
-  return checkDeepSeekConfigured();
+  return checkLlmConfigured({ preset });
+}
+
+function endpointIdentityOf(config: LlmConfig): string {
+  return sha256Hex(config.endpoint).slice(0, 24);
 }
 
 function resolveProjectDir(projectDir: string): string {
@@ -306,14 +319,16 @@ function resolveProjectDir(projectDir: string): string {
 }
 
 /** Provider identities exposed by the current CLI. */
-type ProviderName = "scripted" | "deepseek";
+type ProviderName = "scripted" | "openai-compatible" | "deepseek";
 
 /** Normalize the current provider identity without accepting retired aliases. */
 function normalizeProviderName(name: string): ProviderName {
-  if (name === "scripted") return "scripted";
-  if (name === "deepseek") return "deepseek";
+  const normalized = name.trim().toLowerCase();
+  if (normalized === "scripted") return "scripted";
+  if (normalized === "openai-compatible") return "openai-compatible";
+  if (normalized === "deepseek") return "deepseek";
   throw new Error(
-    `Unknown provider: ${name}. Valid providers: scripted, deepseek`,
+    `Unknown provider: ${name}. Valid providers: scripted, openai-compatible, deepseek`,
   );
 }
 
@@ -1099,12 +1114,12 @@ interface LiveInstructionMeta {
     requestTimeoutMs: number;
     maxOutputTokens?: number;
   };
-  /** The two frozen role groups, their source, and the thinking-mode declaration. */
+  /** The two frozen role groups and the actual OpenAI-compatible request profile. */
   roleOutput: {
     evaluator: { maxOutputTokens?: number; maxOutputTokensBehavior: number | "provider-default"; requestTimeoutMs: number };
     proposer: { maxOutputTokens?: number; maxOutputTokensBehavior: number | "provider-default"; requestTimeoutMs: number };
     source: string;
-    thinkingMode: { setting: string; declared: string };
+    requestProfile: LlmConfig["requestProfile"];
   };
   budget: RunCallBudget;
 }
@@ -1142,9 +1157,9 @@ function parseLivePolicyOrFail(
 
 /**
  * The run-wide role-output block embedded in every current live artifact —
- * both frozen groups, the honest source marker, the thinking-mode declaration.
+ * both frozen groups, the honest source marker, and the request profile.
  */
-function liveRoleOutputMetaOf(live: LiveRunPolicy) {
+function liveRoleOutputMetaOf(live: LiveRunPolicy, config: LlmConfig) {
   return {
     evaluator: { maxOutputTokens: live.evaluator.maxOutputTokens, maxOutputTokensBehavior: maxOutputTokensBehaviorOf(live.evaluator), requestTimeoutMs: live.evaluator.requestTimeoutMs },
     proposer: { maxOutputTokens: live.proposer.maxOutputTokens, maxOutputTokensBehavior: maxOutputTokensBehaviorOf(live.proposer), requestTimeoutMs: live.proposer.requestTimeoutMs },
@@ -1155,17 +1170,32 @@ function liveRoleOutputMetaOf(live: LiveRunPolicy) {
       review: "same-model semantic review; not independent evaluation",
     },
     source: live.roleOutputSource,
-    thinkingMode: { setting: live.thinkingMode.setting, declared: live.thinkingMode.declared },
+    requestProfile: { ...config.requestProfile },
   };
 }
 
-/** The shared preflight lines for the two role groups, the source, and thinking mode. */
-function roleOutputPreflightLines(live: LiveRunPolicy): string[] {
+/** The shared preflight lines for the two role groups and exact request behavior. */
+function roleOutputPreflightLines(live: LiveRunPolicy, config: LlmConfig): string[] {
   return [
     `  Role output policy: evaluator maxTokens ${maxOutputTokensBehaviorOf(live.evaluator)} / timeout ${live.evaluator.requestTimeoutMs}ms; proposer (bootstrap/mutation/repair/direct-refine) maxTokens ${maxOutputTokensBehaviorOf(live.proposer)} / timeout ${live.proposer.requestTimeoutMs}ms; source=${live.roleOutputSource}`,
     `  semantic-judge maxTokens ${maxOutputTokensBehaviorOf(live.evaluator)} / timeout ${live.evaluator.requestTimeoutMs}ms (same-model semantic review; evaluator-sized compact batches; not independent evaluation; public scoring and sealed audit are isolated phases)`,
-    `  Thinking mode: ${live.thinkingMode.declared}`,
+    `  Request profile: preset=${config.requestProfile.preset}; response_format=${config.requestProfile.jsonMode}; reasoning=${config.requestProfile.reasoningMode}; max-token-field=${config.requestProfile.maxTokensField}`,
   ];
+}
+
+function providerIdentityForRoles(
+  config: LlmConfig,
+  live: LiveRunPolicy,
+  roles: readonly LiveProviderRole[],
+): OpenAICompatibleProviderIdentity {
+  return openAICompatibleProviderIdentityOf(roles.map((role) => {
+    const group = roleGroupOf(live, role);
+    return new OpenAICompatibleProvider(config, group.requestTimeoutMs, {
+      maxRetries: 0,
+      role,
+      maxOutputTokens: group.maxOutputTokens,
+    });
+  }));
 }
 
 interface PreflightOptions extends LiveAuthorizationFlags {
@@ -1190,7 +1220,7 @@ interface PreflightOptions extends LiveAuthorizationFlags {
 async function cmdPreflight(opts: PreflightOptions): Promise<void> {
   await cmdAdaptiveRun({
     ...opts,
-    provider: opts.provider ?? "deepseek",
+    provider: opts.provider ?? "openai-compatible",
     mode: opts.mode ?? "standard",
     execute: false,
   });
@@ -2053,6 +2083,8 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
   budget: RunCallBudget;
   fingerprint: string;
   roleFingerprints: Record<LiveProviderRole, string>;
+  providerIdentity: OpenAICompatibleProviderIdentity;
+  config: LlmConfig;
   model: string;
 }> {
   if (!live.u1CallEnvelope) {
@@ -2060,12 +2092,12 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
   }
   let config;
   try {
-    config = getDeepSeekConfig();
+    config = getLlmConfig(live.requestPreset);
   } catch (e) {
-    if (e instanceof DeepSeekConfigError) {
+    if (e instanceof LlmConfigError) {
       intakeFail(
         2,
-        "DEEPSEEK_API_KEY_MISSING: no DEEPSEEK_API_KEY in the process environment or the V3 root .env; copy .env.example to .env — offline commands still work without a key",
+        `${e.code}: ${e.message}; copy .env.example to .env or set explicit LLM_* process variables — offline commands still work without Provider configuration`,
       );
     }
     throw e;
@@ -2083,8 +2115,8 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
   });
   const cache = createInMemoryResponseCache();
   // The evaluator instance wears the evaluator role group; every proposer
-  // wears the proposer group. Every current live role must return strict JSON,
-  // so thinking is explicitly disabled and truncation still fails closed.
+  // wears the proposer group. Request-field compatibility comes only from the
+  // explicit configuration profile, never from a retry-time fallback.
   const scoped = (role: LiveProviderRole, maxRetries: number) => {
     const group = roleGroupOf(live, role);
     const raw = new OpenAICompatibleProvider(config, group.requestTimeoutMs, {
@@ -2092,7 +2124,6 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
       budget,
       role,
       maxOutputTokens: group.maxOutputTokens,
-      thinking: thinkingModeOf(role),
       usageTags: { stage },
     });
     const provider = createCachingProvider(raw, {
@@ -2106,7 +2137,7 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
         skillSnapshotSha256: "-",
         mode: "live",
         maxOutputTokensBehavior: maxOutputTokensBehaviorOf(group),
-        thinkingMode: thinkingModeOf(role) ?? "provider-default",
+        reasoningMode: config.requestProfile.reasoningMode,
         temperatureBehavior: "provider-default",
         frozenEvidenceSha256: "-",
         stage,
@@ -2119,6 +2150,16 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
   const repair = scoped("repair", live.maxRetryAttempts);
   const directRefine = scoped("direct-refine", live.maxRetryAttempts);
   const semanticJudge = scoped("semantic-judge", 0);
+  const identityProviders = stage === "adaptive"
+    ? [evaluator.raw, mutation.raw, repair.raw, semanticJudge.raw]
+    : stage === "public-select"
+      ? [evaluator.raw, semanticJudge.raw]
+      : stage === "direct"
+        ? [evaluator.raw, directRefine.raw, semanticJudge.raw]
+        : stage === "sealed"
+          ? [evaluator.raw, semanticJudge.raw]
+          : [evaluator.raw, semanticJudge.raw];
+  const providerIdentity = openAICompatibleProviderIdentityOf(identityProviders);
   return {
     evaluator: evaluator.provider,
     mutation: mutation.provider,
@@ -2134,13 +2175,15 @@ async function buildLiveEvolutionChain(live: LiveRunPolicy, stage: string): Prom
       "direct-refine": directRefine.raw.configFingerprint(),
       "semantic-judge": semanticJudge.raw.configFingerprint(),
     },
+    providerIdentity,
+    config,
     model: config.model,
   };
 }
 
 /** Shared live-mode note: current U1 observes provider-default tokens unless explicitly overridden. */
 const MAX_OUTPUT_TOKENS_NOTE =
-  "  Token policy: observe-only/provider-default when max_tokens is omitted; an explicit operator override remains a ceiling, not a quality promise; finish_reason=length remains diagnostic and fails closed";
+  "  Token policy: observe-only/provider-default when the configured max-token field is omitted; an explicit operator override remains a ceiling, not a quality promise; finish_reason=length remains diagnostic and fails closed";
 
 function providerTokenTelemetryEvidenceOf(budget: RunCallBudget) {
   return {
@@ -2152,13 +2195,13 @@ function providerTokenTelemetryEvidenceOf(budget: RunCallBudget) {
 /** Live-run metadata embedded in every current formal evolution result. */
 function liveRunMetaOf(
   live: LiveRunPolicy,
-  chain: { model: string; fingerprint: string; budget: RunCallBudget },
+  chain: { providerIdentity: OpenAICompatibleProviderIdentity; config: LlmConfig; budget: RunCallBudget },
 ) {
   if (!live.u1CallEnvelope) {
     intakeFail(2, "LIVE_CURRENT_U1_ENVELOPE_REQUIRED: current Adaptive evidence requires its call envelope");
   }
   return {
-    provider: { name: "deepseek", model: chain.model, configFingerprint: chain.fingerprint },
+    provider: chain.providerIdentity,
     authorizedBudget: {
       maxLogicalCalls: live.maxLogicalCalls,
       maxRetryAttempts: live.maxRetryAttempts,
@@ -2168,7 +2211,7 @@ function liveRunMetaOf(
       proposerMaxOutputTokens: live.proposer.maxOutputTokens,
     },
     callEnvelope: live.u1CallEnvelope,
-    roleOutput: liveRoleOutputMetaOf(live),
+    roleOutput: liveRoleOutputMetaOf(live, chain.config),
     /** Historical aggregate remains readable while the additive projection preserves unknown usage. */
     tokenTelemetry: chain.budget.tokenTelemetry(),
     providerTokenTelemetry: providerTokenTelemetryEvidenceOf(chain.budget),
@@ -2665,11 +2708,7 @@ async function writePublicSelectionFailureArtifact(args: {
   adaptiveResultSha256: string;
   contractSha256: string;
   selectItemsSha256: string;
-  provider: {
-    model: string;
-    evaluatorConfigFingerprint: string;
-    semanticJudgeConfigFingerprint: string;
-  };
+  provider: OpenAICompatibleProviderIdentity;
   semanticRecovery: StageSemanticRecoveryEvidence;
 }): Promise<void> {
   const dynamicEnvelopeExhaustion = dynamicEnvelopeExhaustionEvidenceOf({
@@ -2716,12 +2755,7 @@ async function writePublicSelectionFailureArtifact(args: {
       tokenTelemetry: args.budget.tokenTelemetry(),
       providerTokenTelemetry: providerTokenTelemetryEvidenceOf(args.budget),
       ...stageSemanticRecoveryArtifactFields(args.semanticRecovery),
-      provider: {
-        name: "deepseek",
-        model: args.provider.model,
-        evaluatorConfigFingerprint: args.provider.evaluatorConfigFingerprint,
-        semanticJudgeConfigFingerprint: args.provider.semanticJudgeConfigFingerprint,
-      },
+      provider: args.provider,
       holdout: "sealed",
       release: "withheld (noRelease=true)",
       feedbackToEvolution: false,
@@ -2833,11 +2867,7 @@ async function runAndPersistPublicSelectionStage(args: {
       adaptiveResultSha256: args.adaptiveResultSha256,
       contractSha256: args.inputs.contract.contractSha256,
       selectItemsSha256: frozenSelectHash,
-      provider: {
-        model: selectionChain.model,
-        evaluatorConfigFingerprint: selectionChain.roleFingerprints.evaluator,
-        semanticJudgeConfigFingerprint: selectionChain.roleFingerprints["semantic-judge"],
-      },
+      provider: selectionChain.providerIdentity,
       semanticRecovery,
     });
     console.error(error instanceof Error ? error.message : "PUBLIC_SELECTION_FAILED");
@@ -2869,12 +2899,7 @@ async function runAndPersistPublicSelectionStage(args: {
     ...stageSemanticRecoveryArtifactFields(semanticRecovery),
     applicationRecovery: terminalSelection.applicationRecovery,
     cache: selectionChain.evaluator.cacheStats(),
-    provider: {
-      name: "deepseek",
-      model: selectionChain.model,
-      evaluatorConfigFingerprint: selectionChain.roleFingerprints.evaluator,
-      semanticJudgeConfigFingerprint: selectionChain.roleFingerprints["semantic-judge"],
-    },
+    provider: selectionChain.providerIdentity,
     resumeEvidence: {
       mode: args.mode,
       adaptiveCalls: 0,
@@ -2919,9 +2944,9 @@ async function cmdCalibrationRun(opts: CalibrationRunOptions): Promise<void> {
     return;
   }
   const dir = formal.formalDir;
-  const providerName = (opts.provider ?? "").trim().toLowerCase();
-  if (providerName !== "deepseek") {
-    intakeFail(2, "CALIBRATION_RUN_LIVE_ONLY: calibration-run authorizes the real DeepSeek evaluator only");
+  const providerName = normalizeProviderName(opts.provider ?? "openai-compatible");
+  if (providerName === "scripted") {
+    intakeFail(2, "CALIBRATION_RUN_LIVE_ONLY: calibration-run requires a live OpenAI-compatible provider");
   }
   const calibrationBudget = calculateCalibrationBudget();
   const currentU1ContractProbe = await loadCurrentU1ContractProbe(dir, "CALIBRATION_RUN");
@@ -2970,12 +2995,12 @@ async function cmdCalibrationRun(opts: CalibrationRunOptions): Promise<void> {
 
   let config;
   try {
-    config = getDeepSeekConfig();
+    config = getLlmConfig(live.requestPreset);
   } catch (error) {
-    if (error instanceof DeepSeekConfigError) {
+    if (error instanceof LlmConfigError) {
       intakeFail(
         2,
-        "DEEPSEEK_API_KEY_MISSING: no DEEPSEEK_API_KEY in the process environment or the V3 root .env; offline commands still work without a key",
+        `${error.code}: ${error.message}; offline commands still work without Provider configuration`,
       );
     }
     throw error;
@@ -2990,17 +3015,18 @@ async function cmdCalibrationRun(opts: CalibrationRunOptions): Promise<void> {
     budget,
     role: "semantic-judge",
     maxOutputTokens: live.evaluator.maxOutputTokens,
-    thinking: thinkingModeOf("semantic-judge"),
     usageTags: { stage: "calibration" },
   });
   const fingerprint = rawProvider.configFingerprint();
+  const providerIdentity = openAICompatibleProviderIdentityOf([rawProvider]);
   const outDir = opts.out ? resolve(process.cwd(), opts.out) : join(dir, "adaptive");
   const evidencePath = join(outDir, "calibration-evidence.json");
   const failurePath = join(outDir, "calibration-failure.json");
 
   if (!opts.execute) {
     console.log("=== Current U1 evaluator calibration preflight ===");
-    console.log(`  Provider/model: deepseek / ${config.model}`);
+    console.log(`  Provider/model: openai-compatible (${config.requestProfile.preset}) / ${config.model}`);
+    console.log(`  Endpoint identity: ${endpointIdentityOf(config)}`);
     console.log(`  Configuration fingerprint: ${fingerprint}`);
     console.log(`  Confirmation mode: ${confirmationMode}`);
     for (const line of frozenIdentityPreflightLines(frozenIdentity, frozen.evidence)) console.log(line);
@@ -3031,7 +3057,7 @@ async function cmdCalibrationRun(opts: CalibrationRunOptions): Promise<void> {
     status: "failed",
     contractSha256: frozen.contract.contractSha256,
     calibrationTripletSha256: frozen.contract.calibrationTripletSha256,
-    provider: { name: "deepseek", model: config.model, configFingerprint: fingerprint },
+    provider: providerIdentity,
     confirmationMode,
     explorationOnly: frozen.evidence.explorationOnly,
     humanConfirmationBypassed: frozen.evidence.humanConfirmationBypassed,
@@ -3069,7 +3095,7 @@ async function cmdCalibrationRun(opts: CalibrationRunOptions): Promise<void> {
       status: "passed",
       contractSha256: frozen.contract.contractSha256,
       calibrationTripletSha256: frozen.contract.calibrationTripletSha256,
-      provider: { name: "deepseek", model: config.model, configFingerprint: fingerprint },
+      provider: providerIdentity,
       confirmationMode,
       explorationOnly: frozen.evidence.explorationOnly,
       humanConfirmationBypassed: frozen.evidence.humanConfirmationBypassed,
@@ -3145,11 +3171,11 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
   if (opts.resumePublicSelect !== undefined && !/^[a-f0-9]{64}$/.test(opts.resumePublicSelect)) {
     intakeFail(2, "ADAPTIVE_RUN_RESUME_ADAPTIVE_HASH_INVALID: --resume-public-select must be the exact lowercase SHA-256 of adaptive-result.json");
   }
-  const providerName = (opts.provider ?? "").trim().toLowerCase();
-  if (providerName !== "deepseek") {
+  const providerName = normalizeProviderName(opts.provider ?? "openai-compatible");
+  if (providerName === "scripted") {
     intakeFail(
       2,
-      "ADAPTIVE_RUN_LIVE_ONLY: adaptive-run is the real-evolution command and authorizes the live deepseek path only (use preflight for the zero-network check)",
+      "ADAPTIVE_RUN_LIVE_ONLY: adaptive-run requires the live OpenAI-compatible path (use preflight for the zero-network check)",
     );
   }
 
@@ -3236,18 +3262,14 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
   const preflightRuntimeFactory = realEvolutionInputs.runtimeFactory;
 
   // Authorization and policy are settled; only now may config be read.
-  let model = "";
-  let baseUrl = "";
-  let deepSeekConfig: ReturnType<typeof getDeepSeekConfig>;
+  let llmConfig: LlmConfig;
   try {
-    deepSeekConfig = getDeepSeekConfig();
-    model = deepSeekConfig.model;
-    baseUrl = deepSeekConfig.baseUrl;
+    llmConfig = getLlmConfig(live.requestPreset);
   } catch (e) {
-    if (e instanceof DeepSeekConfigError) {
+    if (e instanceof LlmConfigError) {
       intakeFail(
         2,
-        "DEEPSEEK_API_KEY_MISSING: no DEEPSEEK_API_KEY in the process environment or the V3 root .env; copy .env.example to .env — offline commands still work without a key",
+        `${e.code}: ${e.message}; copy .env.example to .env or set explicit LLM_* process variables`,
       );
     }
     throw e;
@@ -3256,10 +3278,10 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
   if (!opts.execute) {
     console.log("=== Adaptive-run authorization preflight (V3.2) ===");
     console.log(`  Mode: \`live\` (adaptive ${policy.mode}, explorationOnly=${policy.explorationOnly})`);
-    console.log(`  Provider: ${providerName}`);
-    console.log(`  Model: ${model}`);
-    console.log(`  Base URL: ${baseUrl}`);
-    console.log("  API key configured: yes (the value is never printed)");
+    console.log(`  Provider: openai-compatible (preset=${live.requestPreset})`);
+    console.log(`  Model: ${llmConfig.model}`);
+    console.log(`  Endpoint identity: ${endpointIdentityOf(llmConfig)}`);
+    console.log(`  Auth: ${llmConfig.authMode}${llmConfig.authMode === "bearer" ? " (key configured; value withheld)" : " (no Authorization header)"}`);
     console.log(`  Project dir: ${dir}`);
     console.log(
       `  Evidence: ${preflightEvidence.track} (confirmationMode=${preflightEvidence.confirmationMode}, humanConfirmationBypassed=${preflightEvidence.humanConfirmationBypassed})`,
@@ -3281,7 +3303,7 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
     console.log(
       `  Authorized budget: logical calls <= ${live.maxLogicalCalls}, retries <= ${live.maxRetryAttempts}, per-request timeout evaluator ${live.evaluator.requestTimeoutMs}ms / proposer ${live.proposer.requestTimeoutMs}ms, max output tokens evaluator ${maxOutputTokensBehaviorOf(live.evaluator)} / proposer ${maxOutputTokensBehaviorOf(live.proposer)}`,
     );
-    for (const line of roleOutputPreflightLines(live)) console.log(line);
+    for (const line of roleOutputPreflightLines(live, llmConfig)) console.log(line);
     console.log(
       `  Max HTTP attempts: <= ${maxHttpAttemptsOf(live)} (logical calls ${live.maxLogicalCalls} + run-wide retries ${live.maxRetryAttempts})`,
     );
@@ -3323,11 +3345,10 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
         `ADAPTIVE_RUN_CALIBRATION_EVIDENCE_MISSING: run calibration-run --execute first; no passed evidence at ${calibrationPath}`,
       );
     }
-    const fingerprintProbe = new OpenAICompatibleProvider(deepSeekConfig, live.evaluator.requestTimeoutMs, {
+    const fingerprintProbe = new OpenAICompatibleProvider(llmConfig, live.evaluator.requestTimeoutMs, {
       maxRetries: 0,
       role: "semantic-judge",
       maxOutputTokens: live.evaluator.maxOutputTokens,
-      thinking: thinkingModeOf("semantic-judge"),
     });
     try {
       assertCalibrationEvidenceForAdaptive(
@@ -3335,8 +3356,7 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
         {
           contractSha256: frozenContract.contractSha256,
           calibrationTripletSha256: frozenContract.calibrationTripletSha256,
-          model,
-          configFingerprint: fingerprintProbe.configFingerprint(),
+          providerIdentity: openAICompatibleProviderIdentityOf([fingerprintProbe]),
           confirmationMode,
         },
       );
@@ -3364,16 +3384,16 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
     }
     const adaptiveResultPath = join(outDir, "adaptive-result.json");
     const adaptiveRaw = await readFile(adaptiveResultPath, "utf8");
-    const currentEvaluatorFingerprint = new OpenAICompatibleProvider(
-      deepSeekConfig,
-      live.evaluator.requestTimeoutMs,
-      {
-        maxRetries: 0,
-        role: "evaluator",
-        maxOutputTokens: live.evaluator.maxOutputTokens,
-        thinking: thinkingModeOf("evaluator"),
-      },
-    ).configFingerprint();
+    const currentAdaptiveProviderIdentity = providerIdentityForRoles(
+      llmConfig,
+      live,
+      ["evaluator", "mutation", "repair", "semantic-judge"],
+    );
+    const currentPublicProviderIdentity = providerIdentityForRoles(
+      llmConfig,
+      live,
+      ["evaluator", "semantic-judge"],
+    );
     let resumed: ReturnType<typeof validateAdaptiveResultForPublicSelectResume>;
     try {
       resumed = validateAdaptiveResultForPublicSelectResume(adaptiveRaw, {
@@ -3385,8 +3405,7 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
         s0SkillMd: inputs.s0ReferenceSkillMd,
         publicContract: inputs.publicContract,
         confirmationMode: "human",
-        providerModel: model,
-        acceptedEvaluatorConfigFingerprints: [currentEvaluatorFingerprint],
+        providerIdentity: currentAdaptiveProviderIdentity,
         expectedU1Intake: inputs.u1Intake,
       });
     } catch (error) {
@@ -3428,6 +3447,7 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
         !existing.success ||
         existing.data.adaptiveResultSha256 !== resumed.adaptiveResultSha256 ||
         existing.data.contractSha256 !== inputs.contract.contractSha256 ||
+        JSON.stringify(existing.data.provider) !== JSON.stringify(currentPublicProviderIdentity) ||
         (expectedSelectHash !== undefined && existing.data.selectItemsSha256 !== expectedSelectHash)
       ) {
         intakeFail(2, "ADAPTIVE_RUN_RESUME_PUBLIC_SELECTION_RESULT_DRIFT: an existing terminal result is invalid or bound to different frozen evidence");
@@ -3456,7 +3476,7 @@ async function cmdAdaptiveRun(opts: AdaptiveRunOptions): Promise<void> {
         {
           contractSha256: inputs.contract.contractSha256,
           selectItemsSha256: inputs.contract.selectItemsSha256!,
-          providerModel: model,
+          providerIdentity: currentPublicProviderIdentity,
           confirmationMode: "human",
         },
       );
@@ -3775,11 +3795,11 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
     return;
   }
   const dir = formal.formalDir;
-  const providerName = (opts.provider ?? "").trim().toLowerCase();
-  if (providerName !== "deepseek") {
+  const providerName = normalizeProviderName(opts.provider ?? "openai-compatible");
+  if (providerName === "scripted") {
     intakeFail(
       2,
-      "DIRECT_RUN_LIVE_ONLY: direct-run is the real-baseline command and authorizes the live deepseek path only",
+      "DIRECT_RUN_LIVE_ONLY: direct-run is the real-baseline command and requires a live OpenAI-compatible provider",
     );
   }
 
@@ -3811,12 +3831,6 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
       callEnvelope: stageBudgetEnvelope.plan.envelope.direct,
     },
   );
-  if (opts.maxInFlight !== undefined && opts.maxInFlight !== 2) {
-    intakeFail(
-      2,
-      `DIRECT_RUN_MAX_IN_FLIGHT_INVALID: current U1 Direct requires exactly 2 (got ${String(opts.maxInFlight)})`,
-    );
-  }
   const maxInFlight = parseAdaptiveMaxInFlight(opts.maxInFlight);
   const frozenIdentity = await loadCurrentFrozenIdentity({
     dir,
@@ -3836,18 +3850,14 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
     runtimeContext: opts.runtimeContext,
   });
 
-  let model = "";
-  let baseUrl = "";
-  let deepSeekConfig: ReturnType<typeof getDeepSeekConfig>;
+  let llmConfig: LlmConfig;
   try {
-    deepSeekConfig = getDeepSeekConfig();
-    model = deepSeekConfig.model;
-    baseUrl = deepSeekConfig.baseUrl;
+    llmConfig = getLlmConfig(live.requestPreset);
   } catch (e) {
-    if (e instanceof DeepSeekConfigError) {
+    if (e instanceof LlmConfigError) {
       intakeFail(
         2,
-        "DEEPSEEK_API_KEY_MISSING: no DEEPSEEK_API_KEY in the process environment or the V3 root .env; copy .env.example to .env — offline commands still work without a key",
+        `${e.code}: ${e.message}; copy .env.example to .env or set explicit LLM_* process variables`,
       );
     }
     throw e;
@@ -3856,10 +3866,10 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
   if (!opts.execute) {
     console.log("=== Direct-run authorization preflight (current U1) ===");
     console.log(`  Mode: \`live\` (direct ${strategy}, standard)`);
-    console.log(`  Provider: ${providerName}`);
-    console.log(`  Model: ${model}`);
-    console.log(`  Base URL: ${baseUrl}`);
-    console.log("  API key configured: yes (the value is never printed)");
+    console.log(`  Provider: openai-compatible (preset=${live.requestPreset})`);
+    console.log(`  Model: ${llmConfig.model}`);
+    console.log(`  Endpoint identity: ${endpointIdentityOf(llmConfig)}`);
+    console.log(`  Auth: ${llmConfig.authMode}${llmConfig.authMode === "bearer" ? " (key configured; value withheld)" : " (no Authorization header)"}`);
     console.log(`  Project dir: ${dir}`);
     console.log(
       `  Evidence: ${frozenEvidence.evidence.track} (confirmationMode=${frozenEvidence.evidence.confirmationMode}, humanConfirmationBypassed=${frozenEvidence.evidence.humanConfirmationBypassed})`,
@@ -3867,7 +3877,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
     console.log(
       `  Authorized budget: logical calls <= ${live.maxLogicalCalls}, retries <= ${live.maxRetryAttempts}, per-request timeout evaluator ${live.evaluator.requestTimeoutMs}ms / proposer ${live.proposer.requestTimeoutMs}ms, max output tokens evaluator ${maxOutputTokensBehaviorOf(live.evaluator)} / proposer ${maxOutputTokensBehaviorOf(live.proposer)}`,
     );
-    for (const line of roleOutputPreflightLines(live)) console.log(line);
+    for (const line of roleOutputPreflightLines(live, llmConfig)) console.log(line);
     console.log(
       `  Max HTTP attempts: <= ${maxHttpAttemptsOf(live)} (logical calls ${live.maxLogicalCalls} + run-wide retries ${live.maxRetryAttempts})`,
     );
@@ -3877,7 +3887,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
     console.log(
       `  U1 intake: ${realEvolutionInputs.u1Intake.lane} (track ${realEvolutionInputs.u1Intake.track}) — ${realEvolutionInputs.u1Intake.reportingNote}`,
     );
-    console.log(`  Max in-flight provider calls: ${maxInFlight} (current formal path requires exactly 2)`);
+    console.log(`  Max in-flight provider calls: ${maxInFlight} (explicit provider-agnostic scheduler cap)`);
     for (const line of frozenIdentityPreflightLines(frozenIdentity, frozenEvidence.evidence)) console.log(line);
     console.log("  Network: allowed for the authorized model chat only; reference-v1 tools remain zero-network and read-only");
     console.log("  Release: withheld (noRelease=true)");
@@ -3905,11 +3915,10 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
     if (!(await pathExists(calibrationPath))) {
       intakeFail(2, `DIRECT_RUN_CALIBRATION_EVIDENCE_MISSING: run calibration-run --execute first; no passed evidence at ${calibrationPath}`);
     }
-    const fingerprintProbe = new OpenAICompatibleProvider(deepSeekConfig, live.evaluator.requestTimeoutMs, {
+    const fingerprintProbe = new OpenAICompatibleProvider(llmConfig, live.evaluator.requestTimeoutMs, {
       maxRetries: 0,
       role: "semantic-judge",
       maxOutputTokens: live.evaluator.maxOutputTokens,
-      thinking: thinkingModeOf("semantic-judge"),
     });
     try {
       assertCalibrationEvidenceForAdaptive(
@@ -3917,8 +3926,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
         {
           contractSha256: frozenEvidence.contract.contractSha256,
           calibrationTripletSha256: frozenEvidence.contract.calibrationTripletSha256,
-          model,
-          configFingerprint: fingerprintProbe.configFingerprint(),
+          providerIdentity: openAICompatibleProviderIdentityOf([fingerprintProbe]),
           confirmationMode,
         },
       );
@@ -4002,43 +4010,33 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
         "DIRECT_RUN_B0_DRIFT: the current Direct B0 does not match the B0 bound into Adaptive and terminal public-selection evidence",
       );
     }
-    const currentEvaluatorConfigFingerprint = new OpenAICompatibleProvider(
-      deepSeekConfig,
-      live.evaluator.requestTimeoutMs,
-      {
-        maxRetries: 0,
-        role: "evaluator",
-        maxOutputTokens: live.evaluator.maxOutputTokens,
-        thinking: thinkingModeOf("evaluator"),
-      },
-    ).configFingerprint();
-    const currentSemanticJudgeConfigFingerprint = new OpenAICompatibleProvider(
-      deepSeekConfig,
-      live.evaluator.requestTimeoutMs,
-      {
-        maxRetries: 0,
-        role: "semantic-judge",
-        maxOutputTokens: live.evaluator.maxOutputTokens,
-        thinking: thinkingModeOf("semantic-judge"),
-      },
-    ).configFingerprint();
-    const currentDirectProposerConfigFingerprint = new OpenAICompatibleProvider(
-      deepSeekConfig,
-      live.proposer.requestTimeoutMs,
-      {
-        maxRetries: 0,
-        role: "direct-refine",
-        maxOutputTokens: live.proposer.maxOutputTokens,
-        thinking: thinkingModeOf("direct-refine"),
-      },
-    ).configFingerprint();
+    const currentAdaptiveProviderIdentity = providerIdentityForRoles(
+      llmConfig,
+      live,
+      ["evaluator", "mutation", "repair", "semantic-judge"],
+    );
+    const currentPublicProviderIdentity = providerIdentityForRoles(
+      llmConfig,
+      live,
+      ["evaluator", "semantic-judge"],
+    );
+    const currentDirectProviderIdentity = providerIdentityForRoles(
+      llmConfig,
+      live,
+      ["evaluator", "direct-refine", "semantic-judge"],
+    );
+    const adaptiveProvider = OpenAICompatibleProviderIdentitySchema.safeParse(
+      (adaptiveEnvelope as { liveRun?: { provider?: unknown } }).liveRun?.provider,
+    );
     if (
       publicSelection.data.adaptiveResultSha256 !== adaptiveResultSha256 ||
       publicSelection.data.contractSha256 !== inputs.contract.contractSha256 ||
       publicSelection.data.selectItemsSha256 !== inputs.contract.selectItemsSha256 ||
-      publicSelection.data.provider.model !== model ||
-      publicSelection.data.provider.evaluatorConfigFingerprint !== currentEvaluatorConfigFingerprint ||
-      publicSelection.data.provider.semanticJudgeConfigFingerprint !== currentSemanticJudgeConfigFingerprint ||
+      stableStringify(publicSelection.data.provider) !== stableStringify(currentPublicProviderIdentity) ||
+      !adaptiveProvider.success ||
+      stableStringify(adaptiveProvider.data) !== stableStringify(currentAdaptiveProviderIdentity) ||
+      !openAICompatibleProviderIdentitiesCompatible(adaptiveProvider.data, publicSelection.data.provider) ||
+      !openAICompatibleProviderIdentitiesCompatible(publicSelection.data.provider, currentDirectProviderIdentity) ||
       publicSelection.data.confirmationMode !== confirmationMode ||
       publicSelection.data.sealedAllowed !== false ||
       publicSelection.data.releaseAllowed !== false
@@ -4177,13 +4175,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
         ...stageSemanticRecoveryArtifactFields(semanticRecovery),
         applicationRecovery: directResult.applicationRecovery ?? [],
         cache: chain.evaluator.cacheStats(),
-        provider: {
-          name: "deepseek",
-          model: chain.model,
-          evaluatorConfigFingerprint: chain.roleFingerprints.evaluator,
-          proposerConfigFingerprint: chain.roleFingerprints["direct-refine"],
-          semanticJudgeConfigFingerprint: chain.roleFingerprints["semantic-judge"],
-        },
+        provider: chain.providerIdentity,
         promptBoundary: {
           inputs: [directSource.kind, "task-goal", "frozen-direct-instruction"],
           adaptivePopulationIncluded: false,
@@ -4280,13 +4272,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
           ...stageSemanticRecoveryArtifactFields(semanticRecovery),
           applicationRecovery: [],
           cache: chain.directRefine.cacheStats(),
-          provider: {
-            name: "deepseek",
-            model: chain.model,
-            evaluatorConfigFingerprint: chain.roleFingerprints.evaluator,
-            proposerConfigFingerprint: chain.roleFingerprints["direct-refine"],
-            semanticJudgeConfigFingerprint: chain.roleFingerprints["semantic-judge"],
-          },
+          provider: chain.providerIdentity,
           promptBoundary: {
             inputs: [directSource.kind, "task-goal", "frozen-direct-instruction"],
             adaptivePopulationIncluded: false,
@@ -4360,6 +4346,7 @@ async function cmdDirectRun(opts: DirectRunOptions): Promise<void> {
         },
         accounting: { ...chain.budget.accounting },
         tokenTelemetry: providerTokenTelemetryEvidenceOf(chain.budget),
+        provider: chain.providerIdentity,
         ...stageSemanticRecoveryArtifactFields(semanticRecovery),
         ...(dynamicEnvelopeExhaustion ? { dynamicEnvelopeExhaustion } : {}),
         applicationRecovery: error instanceof U1ScenarioEnvelopeError
@@ -4465,6 +4452,7 @@ const U1SealedAdaptiveMetadataSchema = z.object({
   releaseAllowed: z.literal(false),
   sealedAllowed: z.literal(false),
   scoringIdentity: U1ScoringIdentitySchema,
+  liveRun: z.object({ provider: OpenAICompatibleProviderIdentitySchema }).passthrough(),
 }).passthrough();
 
 const U1SealedPublicMetadataSchema = z.object({
@@ -4483,6 +4471,7 @@ const U1SealedPublicMetadataSchema = z.object({
   releaseAllowed: z.literal(false),
   feedbackToEvolution: z.literal(false),
   holdout: z.literal("sealed"),
+  provider: OpenAICompatibleProviderIdentitySchema,
 }).passthrough();
 
 interface U1SealedCliLane {
@@ -4657,9 +4646,9 @@ async function cmdU1SealedAuditCompare(
     opts,
     command: "AUDIT_COMPARE",
   });
-  const providerName = (opts.provider ?? "").trim().toLowerCase();
-  if (providerName !== "deepseek") {
-    intakeFail(2, "AUDIT_COMPARE_LIVE_ONLY: current formal sealed execution authorizes DeepSeek only");
+  const providerName = normalizeProviderName(opts.provider ?? "openai-compatible");
+  if (providerName === "scripted") {
+    intakeFail(2, "AUDIT_COMPARE_LIVE_ONLY: current formal sealed execution requires a live OpenAI-compatible provider");
   }
   const sealedLive = parseLivePolicyOrFail(
     opts,
@@ -4669,14 +4658,37 @@ async function cmdU1SealedAuditCompare(
       callEnvelope: stageBudgetEnvelope.plan.envelope.sealed,
     },
   );
-  let sealedModel: string;
+  let sealedConfig: LlmConfig;
   try {
-    sealedModel = getDeepSeekConfig().model;
+    sealedConfig = getLlmConfig(sealedLive.requestPreset);
   } catch (error) {
-    if (error instanceof DeepSeekConfigError) {
-      intakeFail(2, "DEEPSEEK_API_KEY_MISSING: no DEEPSEEK_API_KEY is configured; the key value is never printed");
+    if (error instanceof LlmConfigError) {
+      intakeFail(2, `${error.code}: ${error.message}; the credential value is never printed`);
     }
     throw error;
+  }
+  const currentPublicProviderIdentity = providerIdentityForRoles(
+    sealedConfig,
+    sealedLive,
+    ["evaluator", "semantic-judge"],
+  );
+  const currentAdaptiveProviderIdentity = providerIdentityForRoles(
+    sealedConfig,
+    sealedLive,
+    ["evaluator", "mutation", "repair", "semantic-judge"],
+  );
+  const currentDirectProviderIdentity = providerIdentityForRoles(
+    sealedConfig,
+    sealedLive,
+    ["evaluator", "direct-refine", "semantic-judge"],
+  );
+  const currentSealedProviderIdentity = providerIdentityForRoles(
+    sealedConfig,
+    sealedLive,
+    ["evaluator", "semantic-judge"],
+  );
+  if (stableStringify(publicArtifact.data.provider) !== stableStringify(currentPublicProviderIdentity)) {
+    intakeFail(2, "AUDIT_COMPARE_U1_PROVIDER_IDENTITY_DRIFT: public-select provider identity differs from the current sealed configuration");
   }
 
   if (!opts.execute) {
@@ -4699,9 +4711,10 @@ async function cmdU1SealedAuditCompare(
     console.log(`  B0-B4 metadata: b0=${present.b0 ? "present" : "MISSING"}, b1=bound, b2=${present.b2 ? "present" : "MISSING"}, b3=${present.b3 ? "present" : "MISSING"}, b4=${present.directResult ? "result-present" : "result-MISSING"}`);
     console.log(`  Novel Final Public Champion: yes (${decision.startingReferenceId} -> ${decision.finalPublicChampionId})`);
     console.log(`  Candidate status: Starting Reference frozen-hash, Adaptive frozen-hash, Direct ${present.directCandidate ? "frozen-artifact-present" : "MISSING"}`);
-    console.log(`  Provider/model: deepseek / ${sealedModel}`);
-    console.log("  API key configured: yes (the value is never printed)");
-    for (const line of roleOutputPreflightLines(sealedLive)) console.log(line);
+    console.log(`  Provider/model: openai-compatible (${sealedLive.requestPreset}) / ${sealedConfig.model}`);
+    console.log(`  Endpoint identity: ${endpointIdentityOf(sealedConfig)}`);
+    console.log(`  Auth: ${sealedConfig.authMode}${sealedConfig.authMode === "bearer" ? " (key configured; value withheld)" : " (no Authorization header)"}`);
+    for (const line of roleOutputPreflightLines(sealedLive, sealedConfig)) console.log(line);
     console.log(MAX_OUTPUT_TOKENS_NOTE);
     for (const line of stageBudgetPreflightLines(stageBudgetEnvelope, sealedLive.maxRetryAttempts)) console.log(line);
     for (const line of runtimeContextPreflightLines(runtimeFactory)) console.log(line);
@@ -4731,6 +4744,7 @@ async function cmdU1SealedAuditCompare(
     const parsed = LiveCalibrationEvidenceSchema.safeParse(calibrationUnknown);
     b2Complete = Boolean(
       parsed.success && parsed.data.contractSha256 === contract.contractSha256 &&
+      openAICompatibleProviderIdentitiesCompatible(parsed.data.provider, currentSealedProviderIdentity) &&
       parsed.data.confirmationMode === "human" && parsed.data.formalEvidence,
     );
   }
@@ -4742,6 +4756,8 @@ async function cmdU1SealedAuditCompare(
   );
   const b3Complete = Boolean(
     adaptiveProbe.success &&
+    stableStringify(adaptiveProbe.data.liveRun.provider) === stableStringify(currentAdaptiveProviderIdentity) &&
+    openAICompatibleProviderIdentitiesCompatible(adaptiveProbe.data.liveRun.provider, currentSealedProviderIdentity) &&
     publicProbe.data.adaptiveResultSha256 === adaptiveSha256,
   );
   if (!adaptiveProbe.success) {
@@ -4788,6 +4804,8 @@ async function cmdU1SealedAuditCompare(
     const directResultProbe = DirectResultArtifactSchema.safeParse(directResultUnknown);
     const directResultValid = directResultProbe.success &&
       "comparison" in directResultProbe.data &&
+      stableStringify(directResultProbe.data.provider) === stableStringify(currentDirectProviderIdentity) &&
+      openAICompatibleProviderIdentitiesCompatible(directResultProbe.data.provider, currentSealedProviderIdentity) &&
       directResultProbe.data.confirmationMode === "human" &&
       directResultProbe.data.formalEvidence;
     if (directResultProbe.success) {
@@ -4835,9 +4853,10 @@ async function cmdU1SealedAuditCompare(
   console.log(`  B0-B4: ${Object.entries(b0B4).map(([stage, complete]) => `${stage}=${complete ? "complete" : "INCOMPLETE"}`).join(", ")}`);
   console.log(`  Novel Final Public Champion: yes (${decision.startingReferenceId} -> ${decision.finalPublicChampionId})`);
   console.log(`  Candidates: Starting Reference frozen, Adaptive frozen, Direct ${directSkill ? "frozen" : "UNAVAILABLE"}`);
-  console.log(`  Provider/model: deepseek / ${sealedModel}`);
-  console.log("  API key configured: yes (the value is never printed)");
-  for (const line of roleOutputPreflightLines(sealedLive)) console.log(line);
+  console.log(`  Provider/model: openai-compatible (${sealedLive.requestPreset}) / ${sealedConfig.model}`);
+  console.log(`  Endpoint identity: ${endpointIdentityOf(sealedConfig)}`);
+  console.log(`  Auth: ${sealedConfig.authMode}${sealedConfig.authMode === "bearer" ? " (key configured; value withheld)" : " (no Authorization header)"}`);
+  for (const line of roleOutputPreflightLines(sealedLive, sealedConfig)) console.log(line);
   console.log(MAX_OUTPUT_TOKENS_NOTE);
   for (const line of stageBudgetPreflightLines(stageBudgetEnvelope, sealedLive.maxRetryAttempts)) console.log(line);
   for (const line of runtimeContextPreflightLines(runtimeFactory)) console.log(line);
@@ -4906,6 +4925,7 @@ async function cmdU1SealedAuditCompare(
       stageBudgetAssumptions: stageBudgetEnvelope.plan.assumptions,
       authorizedStageBudgets: stageBudgetEnvelope.authorized,
       budget: sealedBudget,
+      providerIdentity: currentSealedProviderIdentity,
       runner,
       scoreRuns,
     });
@@ -4944,6 +4964,7 @@ async function cmdU1SealedAuditCompare(
           },
           accounting: { ...sealedBudget.accounting },
           providerTokenTelemetry: providerTokenTelemetryEvidenceOf(sealedBudget),
+          provider: currentSealedProviderIdentity,
           ...(dynamicEnvelopeExhaustion ? { dynamicEnvelopeExhaustion } : {}),
           scoringIdentity: sealedScoringIdentity,
           bodyReads: 1,
@@ -5059,7 +5080,7 @@ async function cmdDoctor(
   let allOk = true;
 
   // Normalize provider name if provided
-  let normalizedProvider: "scripted" | "deepseek" | undefined;
+  let normalizedProvider: ProviderName | undefined;
   if (providerName) {
     normalizedProvider = normalizeProviderName(providerName);
   }
@@ -5082,18 +5103,20 @@ async function cmdDoctor(
   console.log("Skill directory: not supplied (provider diagnostics only).");
   console.log("");
 
-  // Provider credentials
-  if (normalizedProvider === "deepseek") {
-    console.log("Provider: deepseek");
-    const configured = isDeepSeekConfigured();
-    console.log(`  API key configured: ${configured ? "yes" : "no"}`);
+  // Provider configuration
+  if (normalizedProvider === "deepseek" || normalizedProvider === "openai-compatible") {
+    const preset = normalizedProvider === "deepseek" ? "deepseek" : "portable";
+    console.log(`Provider: openai-compatible (preset=${preset})`);
+    const configured = isLlmConfigured(preset);
+    console.log(`  Configuration valid: ${configured ? "yes" : "no"}`);
     if (configured) {
-      const config = getDeepSeekConfig();
-      console.log(`  Base URL: ${config.baseUrl}`);
+      const config = getLlmConfig(preset);
+      console.log(`  Endpoint identity: ${endpointIdentityOf(config)}`);
       console.log(`  Model: ${config.model}`);
+      console.log(`  Auth: ${config.authMode}${config.authMode === "bearer" ? " (credential configured; value withheld)" : " (no Authorization header)"}`);
     } else {
-      console.log("  Set DEEPSEEK_API_KEY in a local .env file to use the real model provider.");
-      console.log("  The API will NOT be called until the key is configured.");
+      console.log("  Set LLM_BASE_URL, LLM_MODEL and LLM_AUTH_MODE; bearer mode also requires LLM_API_KEY.");
+      console.log("  No Provider call is made by doctor.");
       allOk = false;
     }
     console.log("");
@@ -5116,7 +5139,7 @@ async function cmdProviderCheck(
     throw new CommanderError(
       1,
       "SCRIPTED_NOT_SUPPORTED",
-      "provider-check does not support the scripted provider. Use --provider deepseek.",
+      "provider-check does not support the scripted provider. Use --provider openai-compatible or --provider deepseek.",
     );
   }
 
@@ -5132,21 +5155,21 @@ async function cmdProviderCheck(
     );
   }
 
-  // deepseek: make a single minimal Chat Completions call
-  let config;
+  const preset: LlmRequestPreset = normalized === "deepseek" ? "deepseek" : "portable";
+  let config: LlmConfig;
   try {
-    config = getDeepSeekConfig();
-  } catch {
-    console.log("Provider: deepseek");
-    console.log("  API key configured: no");
-    console.log("  ERROR: DEEPSEEK_API_KEY is not set. Configure it in .env first.");
-    throw new CommanderError(1, "DEEPSEEK_API_KEY_MISSING", "DEEPSEEK_API_KEY is not set.");
+    config = getLlmConfig(preset);
+  } catch (error) {
+    const code = error instanceof LlmConfigError ? error.code : "LLM_CONFIGURATION_INVALID";
+    console.log(`Provider: openai-compatible (preset=${preset})`);
+    console.log(`  ERROR: ${code}`);
+    throw new CommanderError(1, code, `${code}: live Provider configuration is invalid.`);
   }
 
-  console.log("Provider: deepseek");
-  console.log(`  Base URL: ${config.baseUrl}`);
+  console.log(`Provider: openai-compatible (preset=${preset})`);
+  console.log(`  Endpoint identity: ${endpointIdentityOf(config)}`);
   console.log(`  Model: ${config.model}`);
-  console.log("  API key configured: yes");
+  console.log(`  Auth: ${config.authMode}${config.authMode === "bearer" ? " (credential configured; value withheld)" : " (no Authorization header)"}`);
   console.log("");
   console.log("Performing single connection check...");
 
@@ -5197,11 +5220,7 @@ async function cmdProviderCheck(
           stage: "provider-check",
           status: "passed",
           evidenceScope: "connectivity-only",
-          provider: {
-            name: "deepseek",
-            model: config.model,
-            configFingerprint: rawProvider.configFingerprint(),
-          },
+          provider: openAICompatibleProviderIdentityOf([rawProvider]),
           requestFingerprint,
           resultFingerprint: sha256Hex(JSON.stringify(parsedResponse)),
           accounting: { ...budget.accounting },
@@ -5231,11 +5250,7 @@ async function cmdProviderCheck(
           stage: "provider-check",
           status: "failed",
           evidenceScope: "connectivity-only",
-          provider: {
-            name: "deepseek",
-            model: config.model,
-            configFingerprint: rawProvider.configFingerprint(),
-          },
+          provider: openAICompatibleProviderIdentityOf([rawProvider]),
           requestFingerprint,
           errorCode: safeError,
           accounting: { ...budget.accounting },
@@ -5364,31 +5379,31 @@ async function runCliInternal(
     .requiredOption("--dir <dir>", "current formal case directory")
     .requiredOption("--skill-md <path>", "formal B0 SKILL.md")
     .option("--runtime-context <path>", "explicit runtime-context.v1.json required by reference-v1")
-    .option("--provider <mode>", "deepseek (authorization is validated but no request is sent)", "deepseek")
+    .option("--provider <mode>", "openai-compatible (portable default) or deepseek request preset; no request is sent", "openai-compatible")
     .option("--allow-network", "validate the live-network authorization gate; preflight itself stays zero-network")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
     .option("--no-release", "withhold any release path (mandatory for live runs)")
     .option("--max-retry-attempts <number>", "live cap on transport retries (0-8)", Number)
     .option("--call-envelope-multiplier <number>", "current U1 B/M/H safety multiplier (finite >=1; default 2.0)", Number)
-    .option("--evaluator-max-output-tokens <number>", "optional evaluator max_tokens override; defaults to provider-default observe-only", Number)
-    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (1000-180000)", Number)
-    .option("--proposer-max-output-tokens <number>", "optional proposer max_tokens override; defaults to provider-default observe-only", Number)
-    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (1000-180000)", Number)
+    .option("--evaluator-max-output-tokens <number>", "optional evaluator max-token override; defaults to provider-default observe-only", Number)
+    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
+    .option("--proposer-max-output-tokens <number>", "optional proposer max-token override; defaults to provider-default observe-only", Number)
+    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
     .option("--mode <mode>", "formal execution mode: standard", "standard")
     .option("--early-repair <mode>", "refinement gate: auto (default), off, or force")
     .option("--max-generations <number>", "adaptive generations (1-4; default 2)", Number)
     .option("--max-refinements <number>", "refinements per candidate (0-4; default 1)", Number)
     .option("--min-repair-progress <points>", "minimum public-score improvement in absolute points", Number)
     .option("--stagnation-patience <number>", "consecutive stagnant generations before stop", Number)
-    .option("--max-in-flight <number>", "local parallel provider-call cap (current formal U1 requires 2)", Number)
+    .option("--max-in-flight <number>", "local parallel provider-call cap (1-4; default 2)", Number)
     .action(async (opts: PreflightOptions) => {
       await cmdPreflight(opts);
     });
 
   program
     .command("provider-check")
-    .description("Perform a single minimal DeepSeek connection check. Requires the same live authorization flags; does not create runs or candidates.")
-    .requiredOption("--provider <value>", "deepseek only (scripted is not supported)")
+    .description("Perform one minimal OpenAI-compatible connection check. Requires live authorization; does not create runs or candidates.")
+    .requiredOption("--provider <value>", "openai-compatible or deepseek request preset (scripted is not supported)")
     .option("--out <dir>", "write one stable, desensitized connectivity evidence file")
     .option("--allow-network", "authorize the real network request (mandatory)")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
@@ -5402,14 +5417,14 @@ async function runCliInternal(
     .description("Run two evaluator-only Good/Borderline/Unsafe primary passes, each with at most one content-free schema repair, and write desensitized gate evidence. Without --execute: zero network requests, nothing written.")
     .requiredOption("--dir <dir>", "directory holding the current frozen contract, draft, review and Task Card")
     .option("--out <dir>", "current formal evidence directory (default: <formal-dir>/adaptive)")
-    .option("--provider <mode>", "deepseek only")
+    .option("--provider <mode>", "openai-compatible (portable default) or deepseek request preset")
     .option("--allow-network", "authorize 2 primary calibration passes plus up to 2 content-free schema-repair calls")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
     .option("--no-release", "withhold release (mandatory)")
     .option("--max-retry-attempts <number>", "must be exactly 0", Number)
-    .option("--evaluator-max-output-tokens <number>", "optional evaluator max_tokens override; current U1 calibration defaults to provider-default observe-only", Number)
-    .option("--evaluator-request-timeout-ms <number>", "evaluator per-request timeout (1000-180000ms)", Number)
-    .option("--proposer-max-output-tokens <number>", "optional proposer max_tokens override; calibration never calls it and current U1 defaults to provider-default observe-only", Number)
+    .option("--evaluator-max-output-tokens <number>", "optional evaluator max-token override; current U1 calibration defaults to provider-default observe-only", Number)
+    .option("--evaluator-request-timeout-ms <number>", "evaluator per-request timeout (>=1000ms; JS timer-safe)", Number)
+    .option("--proposer-max-output-tokens <number>", "optional proposer max-token override; calibration never calls it and current U1 defaults to provider-default observe-only", Number)
     .option("--proposer-request-timeout-ms <number>", "required role declaration; calibration never calls it", Number)
     .option("--mode <mode>", "formal execution mode: standard", "standard")
     .option("--execute", "perform the 2 bounded primary passes and any required one-per-pass schema repair, then write gate evidence")
@@ -5422,16 +5437,16 @@ async function runCliInternal(
     .description("Authorize and run the current formal Adaptive population chain; without --execute: zero Provider calls and no writes.")
     .requiredOption("--dir <dir>", "directory the adaptive run operates on")
     .option("--out <dir>", "artifact directory for --execute (default: <formal-dir>/adaptive)")
-    .option("--provider <mode>", "deepseek (live; every authorization gate required)")
+    .option("--provider <mode>", "openai-compatible (portable default) or deepseek request preset")
     .option("--allow-network", "authorize network access for the live provider")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
     .option("--no-release", "withhold any release path (mandatory for live runs)")
     .option("--call-envelope-multiplier <number>", "current U1 B/M/H safety multiplier (finite >=1; default 2.0)", Number)
     .option("--max-retry-attempts <number>", "live cap on transport retries (0-8)", Number)
-    .option("--evaluator-max-output-tokens <number>", "optional evaluator max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (1000-180000)", Number)
-    .option("--proposer-max-output-tokens <number>", "optional proposer max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (1000-180000)", Number)
+    .option("--evaluator-max-output-tokens <number>", "optional evaluator max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
+    .option("--proposer-max-output-tokens <number>", "optional proposer max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
     .option("--mode <mode>", "formal execution mode: standard", "standard")
     .option("--resume-public-select <sha256>", "retry only a previously failed terminal public-select stage, bound to the exact existing adaptive-result.json SHA-256; never reruns Adaptive")
     .option("--early-repair <mode>", "refinement gate: auto (default), off, or force")
@@ -5453,18 +5468,18 @@ async function runCliInternal(
     .requiredOption("--dir <dir>", "directory the direct run operates on")
     .option("--out <dir>", "artifact directory for --execute (default: <formal-dir>/adaptive)")
     .option("--strategy <mode>", "current Direct strategy: one_shot", "one_shot")
-    .option("--provider <mode>", "deepseek (live; every authorization gate required)")
+    .option("--provider <mode>", "openai-compatible (portable default) or deepseek request preset")
     .option("--allow-network", "authorize network access for the live provider")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
     .option("--no-release", "withhold any release path (mandatory for live runs)")
     .option("--call-envelope-multiplier <number>", "current U1 B/M/H safety multiplier (finite >=1; default 2.0)", Number)
     .option("--max-retry-attempts <number>", "live cap on transport retries (0-8)", Number)
-    .option("--evaluator-max-output-tokens <number>", "optional evaluator max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (1000-180000)", Number)
-    .option("--proposer-max-output-tokens <number>", "optional proposer max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (1000-180000)", Number)
+    .option("--evaluator-max-output-tokens <number>", "optional evaluator max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
+    .option("--proposer-max-output-tokens <number>", "optional proposer max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
     .option("--mode <mode>", "formal execution mode: standard", "standard")
-    .option("--max-in-flight <number>", "local provider-call cap (current formal U1 requires 2)", Number)
+    .option("--max-in-flight <number>", "local provider-call cap (1-4; default 2)", Number)
     .option("--execute", "run the authorized live baseline (loads the frozen contract/card/draft; spends the authorized budget)")
     .option("--skill-md <path>", "the base SKILL.md the baseline evaluates (required for formal preflight and execute)")
     .option("--runtime-context <path>", "explicit runtime-context.v1.json required by a reference-v1 contract")
@@ -5478,16 +5493,16 @@ async function runCliInternal(
     .requiredOption("--dir <dir>", "directory holding the case artifacts (adaptive/direct/audit)")
     .option("--out <dir>", "artifact directory for --execute (default: <formal-dir>/audit)")
     .option("--runtime-context <path>", "explicit runtime-context.v1.json required by a reference-v1 contract")
-    .option("--provider <mode>", "deepseek (live; every authorization gate required)")
+    .option("--provider <mode>", "openai-compatible (portable default) or deepseek request preset")
     .option("--allow-network", "authorize network access for the live provider")
     .option("--confirm-real-provider <phrase>", `live confirmation phrase; must be exactly ${LIVE_CONFIRM_PHRASE}`)
     .option("--no-release", "withhold any release path (mandatory for live runs)")
     .option("--call-envelope-multiplier <number>", "current U1 B/M/H safety multiplier (finite >=1; default 2.0)", Number)
     .option("--max-retry-attempts <number>", "live cap on transport retries (0-8)", Number)
-    .option("--evaluator-max-output-tokens <number>", "optional evaluator max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (1000-180000)", Number)
-    .option("--proposer-max-output-tokens <number>", "optional proposer max_tokens override; current U1 defaults to provider-default observe-only", Number)
-    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (1000-180000)", Number)
+    .option("--evaluator-max-output-tokens <number>", "optional evaluator max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--evaluator-request-timeout-ms <number>", "live evaluator-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
+    .option("--proposer-max-output-tokens <number>", "optional proposer max-token override; current U1 defaults to provider-default observe-only", Number)
+    .option("--proposer-request-timeout-ms <number>", "live proposer-role per-request timeout in milliseconds (>=1000; JS timer-safe)", Number)
     .option("--execute", "run the authorized live comparison (reads the sealed audit file after candidate selection)")
     .action(async (opts: AuditCompareOptions) => {
       await cmdAuditCompare(opts);

@@ -29,6 +29,27 @@ const HUMAN_FLAGS = {
   releaseAllowed: false,
 };
 
+function providerIdentity(roles: readonly ("evaluator" | "directRefine" | "semanticJudge")[]) {
+  return {
+    adapterVersion: "openai-chat-completions-v1" as const,
+    name: "openai-compatible" as const,
+    endpointIdentity: "9".repeat(24),
+    model: "fixture-model",
+    authMode: "none" as const,
+    requestProfile: {
+      preset: "portable" as const,
+      jsonMode: "omitted" as const,
+      reasoningMode: "provider-default" as const,
+      maxTokensField: "max_tokens" as const,
+    },
+    roles: Object.fromEntries(roles.map((role, index) => [role, {
+      requestTimeoutMs: role === "directRefine" ? 180_000 : 120_000,
+      maxOutputTokensBehavior: "provider-default" as const,
+      configFingerprint: String(index + 1).repeat(24),
+    }])),
+  };
+}
+
 function diagnostic(stage: "public-select" | "direct", attempt: 1 | 2 = 1) {
   return {
     subject: { kind: "stage", stage },
@@ -58,6 +79,7 @@ function publicFailure() {
       completionTokens: 5,
       responses: 2,
     },
+    provider: providerIdentity(["evaluator", "semanticJudge"]),
     actualApplicationRecoveryAttempts: 1,
     structureRecoveryDiagnostics: [diagnostic("public-select")],
     ...HUMAN_FLAGS,
@@ -78,6 +100,7 @@ function directFailure() {
     budget: { envelope: { existingRecoveryReserve: 1 } },
     accounting: { logicalCalls: 2, httpAttempts: 2, retryAttempts: 0 },
     tokenTelemetry: { promptTokens: 10, completionTokens: 5, responses: 2 },
+    provider: providerIdentity(["evaluator", "directRefine", "semanticJudge"]),
     actualApplicationRecoveryAttempts: 1,
     structureRecoveryDiagnostics: [diagnostic("direct")],
     ...HUMAN_FLAGS,

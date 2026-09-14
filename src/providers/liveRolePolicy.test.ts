@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import {
   parseLiveRunPolicy,
   roleGroupOf,
-  thinkingModeOf,
   LIVE_CONFIRM_PHRASE,
   LIVE_ROLE_RANGES,
   type LiveRunPolicyInput,
@@ -15,6 +14,7 @@ import { calculateCallEnvelope, calculateScenarioCallAuthorization } from "./sta
 import { createOpenAICompatibleRepairProposer } from "../evolution/repairProposerProvider.js";
 import { RepairFrontierError } from "../evolution/repairFrontier.js";
 import type { FrontierTicket } from "../types.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── V3.1 P2 任务 A/B：输出预算分角色化（Red→Green）─────────────────
 //
@@ -25,10 +25,18 @@ import type { FrontierTicket } from "../types.js";
 // legacy 全局参数走显式兼容路径并被如实声明。全部测试零网络（mock fetch /
 // preflight 不 --execute）。
 
-const FAKE_CONFIG = {
+const FAKE_CONFIG: LlmConfig = {
   apiKey: "test-key",
+  authMode: "bearer",
   baseUrl: "https://api.deepseek.test.invalid",
+  endpoint: "https://api.deepseek.test.invalid/chat/completions",
   model: "deepseek-v4-flash",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
 };
 
 const EXPLICIT_ROLES = {
@@ -51,34 +59,22 @@ function roleInput(overrides: Partial<LiveRunPolicyInput> = {}): LiveRunPolicyIn
   };
 }
 
-// ── 1. 显式角色参数：解析、冻结、来源与 thinkingMode 声明 ──────────
+// ── 1. 显式角色参数：解析、冻结与来源声明 ───────────────────────
 
-test("explicit role params parse into frozen per-role groups with role-scoped thinkingMode declared", () => {
+test("explicit role params parse into frozen per-role groups", () => {
   const policy = parseLiveRunPolicy(roleInput());
   assert.deepEqual(policy.evaluator, { maxOutputTokens: 2_048, requestTimeoutMs: 8_000 });
   assert.deepEqual(policy.proposer, { maxOutputTokens: 8_192, requestTimeoutMs: 30_000 });
   assert.equal(policy.roleOutputSource, "explicit-role-params");
   assert.equal(Object.isFrozen(policy.evaluator), true);
   assert.equal(Object.isFrozen(policy.proposer), true);
-  assert.equal(String(policy.thinkingMode.setting), "role-scoped");
-  assert.match(policy.thinkingMode.declared, /evaluator[\s\S]*semantic-judge[\s\S]*disabled/i);
-  assert.match(policy.thinkingMode.declared, /mutation[\s\S]*repair[\s\S]*direct-refine[\s\S]*disabled/i);
 });
 
-test("role-scoped thinking disables every strict-JSON live role", () => {
-  assert.equal(typeof thinkingModeOf, "function");
-  assert.equal(thinkingModeOf("evaluator"), "disabled");
-  assert.equal(thinkingModeOf("semantic-judge"), "disabled");
-  assert.equal(thinkingModeOf("mutation"), "disabled");
-  assert.equal(thinkingModeOf("repair"), "disabled");
-  assert.equal(thinkingModeOf("direct-refine"), "disabled");
-});
-
-test("role ranges are frozen constants: evaluator 512-4096, proposer 1024-16384, timeouts 1000-180000", () => {
+test("role ranges retain token bounds and allow long explicit timeouts within the JavaScript timer limit", () => {
   assert.deepEqual(LIVE_ROLE_RANGES.evaluator.maxOutputTokens, { min: 512, max: 4_096 });
   assert.deepEqual(LIVE_ROLE_RANGES.proposer.maxOutputTokens, { min: 1_024, max: 16_384 });
-  assert.deepEqual(LIVE_ROLE_RANGES.evaluator.requestTimeoutMs, { min: 1_000, max: 180_000 });
-  assert.deepEqual(LIVE_ROLE_RANGES.proposer.requestTimeoutMs, { min: 1_000, max: 180_000 });
+  assert.deepEqual(LIVE_ROLE_RANGES.evaluator.requestTimeoutMs, { min: 1_000, max: 2_147_483_647 });
+  assert.deepEqual(LIVE_ROLE_RANGES.proposer.requestTimeoutMs, { min: 1_000, max: 2_147_483_647 });
 });
 
 test("semantic-judge is an explicit runtime role that reuses the evaluator output group", () => {
@@ -117,9 +113,9 @@ test("role values outside their role range fail with the range spelled out", () 
     ["proposerMaxOutputTokens", 1_023, "1024"],
     ["proposerMaxOutputTokens", 16_385, "16384"],
     ["evaluatorRequestTimeoutMs", 999, "1000"],
-    ["evaluatorRequestTimeoutMs", 180_001, "180000"],
+    ["evaluatorRequestTimeoutMs", 2_147_483_648, "2147483647"],
     ["proposerRequestTimeoutMs", 999, "1000"],
-    ["proposerRequestTimeoutMs", 180_001, "180000"],
+    ["proposerRequestTimeoutMs", 2_147_483_648, "2147483647"],
   ];
   for (const [field, value, bound] of cases) {
     assert.throws(
@@ -165,11 +161,9 @@ test("evaluator and proposer instances send their own max_tokens from their role
     const budget = new RunCallBudget({ maxLogicalCalls: 10, maxRetryAttempts: 1 });
     const evaluator = new OpenAICompatibleProvider(FAKE_CONFIG, policy.evaluator.requestTimeoutMs, {
       maxRetries: 0, budget, role: "evaluator", maxOutputTokens: policy.evaluator.maxOutputTokens,
-      thinking: thinkingModeOf("evaluator"),
     });
     const repair = new OpenAICompatibleProvider(FAKE_CONFIG, policy.proposer.requestTimeoutMs, {
       maxRetries: 0, budget, role: "repair", maxOutputTokens: policy.proposer.maxOutputTokens,
-      thinking: thinkingModeOf("repair"),
     });
     await evaluator.chat([{ role: "user", content: "eval" }]);
     await repair.chat([{ role: "user", content: "propose" }]);

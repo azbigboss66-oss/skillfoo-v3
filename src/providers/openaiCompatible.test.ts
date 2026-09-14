@@ -2,14 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenAICompatibleProvider, OpenAICompatibleProviderError } from "./openaiCompatible.js";
 import { RunCallBudget, ProviderBudgetError } from "./runBudget.js";
-import type { DeepSeekConfig } from "../config/deepseekConfig.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── Helpers ─────────────────────────────────────────────────────
 
-const FAKE_CONFIG: DeepSeekConfig = {
+const FAKE_CONFIG: LlmConfig = {
   apiKey: "test-key",
+  authMode: "bearer",
   baseUrl: "https://api.deepseek.com",
+  endpoint: "https://api.deepseek.com/chat/completions",
   model: "deepseek-v4-flash",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
 };
 
 /** Capture the fetch arguments and return a controlled response. */
@@ -141,20 +149,18 @@ test("temperature is sent only when the caller explicitly supplies it", async ()
   assert.equal(body.temperature, 0);
 });
 
-test("explicit disabled thinking is sent and changes the provider cache fingerprint", async () => {
+test("request-profile reasoning mode is sent and partitions the provider cache fingerprint", async () => {
   const { calls } = mockFetch({
     body: JSON.stringify({
       choices: [{ message: { content: '{"type":"final"}' } }],
     }),
   });
 
-  const provider = new OpenAICompatibleProvider(FAKE_CONFIG, 30_000, {
-    maxRetries: 0,
-    thinking: "disabled",
-  } as ConstructorParameters<typeof OpenAICompatibleProvider>[2]);
-  const defaultThinkingProvider = new OpenAICompatibleProvider(FAKE_CONFIG, 30_000, {
-    maxRetries: 0,
-  });
+  const provider = new OpenAICompatibleProvider(FAKE_CONFIG, 30_000, { maxRetries: 0 });
+  const defaultThinkingProvider = new OpenAICompatibleProvider({
+    ...FAKE_CONFIG,
+    requestProfile: { ...FAKE_CONFIG.requestProfile, reasoningMode: "provider-default" },
+  }, 30_000, { maxRetries: 0 });
   await provider.chat([{ role: "user", content: "test" }], { responseFormat: "json_object" });
 
   const body = JSON.parse(calls[0].init?.body as string) as Record<string, unknown>;
@@ -400,10 +406,13 @@ test("constructor uses the explicit config apiKey, not any environment variable"
     }),
   });
 
-  const config: DeepSeekConfig = {
+  const config: LlmConfig = {
     apiKey: "explicit-key",
+    authMode: "bearer",
     baseUrl: "https://api.deepseek.com",
+    endpoint: "https://api.deepseek.com/chat/completions",
     model: "deepseek-v4-flash",
+    requestProfile: FAKE_CONFIG.requestProfile,
   };
 
   const provider = new OpenAICompatibleProvider(config);
@@ -425,8 +434,11 @@ test("baseUrl with trailing slash produces correct URL without double slash", as
 
   const provider = new OpenAICompatibleProvider({
     apiKey: "test-key",
+    authMode: "bearer",
     baseUrl: "https://api.deepseek.com/",
+    endpoint: "https://api.deepseek.com/chat/completions",
     model: "deepseek-v4-flash",
+    requestProfile: FAKE_CONFIG.requestProfile,
   });
   await provider.chat([{ role: "user", content: "test" }]);
 

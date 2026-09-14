@@ -610,6 +610,23 @@ test("current-v2 sealed dynamic exhaustion requires exact sanitized one-shot B/M
         },
       }],
     },
+    provider: {
+      adapterVersion: "openai-chat-completions-v1",
+      name: "openai-compatible",
+      endpointIdentity: "e".repeat(24),
+      model: "deepseek-test",
+      authMode: "bearer",
+      requestProfile: {
+        preset: "deepseek",
+        jsonMode: "json_object",
+        reasoningMode: "thinking-disabled",
+        maxTokensField: "max_tokens",
+      },
+      roles: {
+        evaluator: { requestTimeoutMs: 120_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "a".repeat(24) },
+        semanticJudge: { requestTimeoutMs: 120_000, maxOutputTokensBehavior: "provider-default", configFingerprint: "b".repeat(24) },
+      },
+    },
     dynamicEnvelopeExhaustion: {
       status: "dynamic-envelope-exhausted",
       classification: "unknown_bounded_exhaustion",

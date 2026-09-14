@@ -1487,6 +1487,50 @@ export const ProviderTokenTelemetryEvidenceSchema = ProviderTokenTelemetryTotals
 });
 export type ProviderTokenTelemetryEvidence = z.infer<typeof ProviderTokenTelemetryEvidenceSchema>;
 
+const ProviderFingerprintSchema = z.string().regex(/^[0-9a-f]{24}$/);
+const ProviderRoleRuntimeIdentitySchema = z.object({
+  requestTimeoutMs: z.number().int().min(1).max(2_147_483_647),
+  maxOutputTokensBehavior: z.union([z.number().int().positive(), z.literal("provider-default")]),
+  configFingerprint: ProviderFingerprintSchema,
+}).strict();
+
+/**
+ * Safe execution identity shared by every current live U1 artifact. It binds
+ * the normalized endpoint and exact wire behavior but deliberately has no
+ * credential field.
+ */
+export const OpenAICompatibleProviderIdentitySchema = z.object({
+  adapterVersion: z.literal("openai-chat-completions-v1"),
+  name: z.literal("openai-compatible"),
+  endpointIdentity: ProviderFingerprintSchema,
+  model: z.string().trim().min(1),
+  authMode: z.enum(["bearer", "none"]),
+  requestProfile: z.object({
+    preset: z.enum(["portable", "deepseek"]),
+    jsonMode: z.enum(["json_object", "omitted"]),
+    reasoningMode: z.enum([
+      "provider-default",
+      "thinking-enabled",
+      "thinking-disabled",
+      "effort-none",
+      "effort-minimal",
+      "effort-low",
+      "effort-medium",
+      "effort-high",
+      "effort-xhigh",
+    ]),
+    maxTokensField: z.enum(["max_tokens", "max_completion_tokens"]),
+  }).strict(),
+  roles: z.object({
+    evaluator: ProviderRoleRuntimeIdentitySchema.optional(),
+    mutation: ProviderRoleRuntimeIdentitySchema.optional(),
+    repair: ProviderRoleRuntimeIdentitySchema.optional(),
+    directRefine: ProviderRoleRuntimeIdentitySchema.optional(),
+    semanticJudge: ProviderRoleRuntimeIdentitySchema.optional(),
+  }).strict().refine((roles) => Object.values(roles).some(Boolean), "at least one live role identity is required"),
+}).strict();
+export type OpenAICompatibleProviderIdentity = z.infer<typeof OpenAICompatibleProviderIdentitySchema>;
+
 const CalibrationRecoverySubjectSchema = z.object({
   kind: z.literal("stage"),
   stage: z.literal("calibration"),
@@ -1587,11 +1631,7 @@ export const LiveCalibrationEvidenceSchema = z.object({
   status: z.literal("passed"),
   contractSha256: Sha256Schema,
   calibrationTripletSha256: Sha256Schema,
-  provider: z.object({
-    name: z.literal("deepseek"),
-    model: z.string().trim().min(1),
-    configFingerprint: z.string().regex(/^[0-9a-f]{24}$/),
-  }).strict(),
+  provider: OpenAICompatibleProviderIdentitySchema,
   confirmationMode: z.literal("human"),
   explorationOnly: z.literal(false),
   humanConfirmationBypassed: z.literal(false),
@@ -1640,11 +1680,7 @@ export const LiveCalibrationFailureEvidenceSchema = z.object({
   status: z.literal("failed"),
   contractSha256: Sha256Schema,
   calibrationTripletSha256: Sha256Schema,
-  provider: z.object({
-    name: z.literal("deepseek"),
-    model: z.string().trim().min(1),
-    configFingerprint: z.string().regex(/^[0-9a-f]{24}$/),
-  }).strict(),
+  provider: OpenAICompatibleProviderIdentitySchema,
   confirmationMode: z.literal("human"),
   explorationOnly: z.literal(false),
   humanConfirmationBypassed: z.literal(false),

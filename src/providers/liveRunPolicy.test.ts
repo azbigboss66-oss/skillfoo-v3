@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseLiveRunPolicy, maxHttpAttemptsOf, thinkingModeOf, LIVE_CONFIRM_PHRASE, type LiveRunPolicyInput } from "./liveRunPolicy.js";
+import { parseLiveRunPolicy, maxHttpAttemptsOf, LIVE_CONFIRM_PHRASE, type LiveRunPolicyInput } from "./liveRunPolicy.js";
 import { OpenAICompatibleProvider, OpenAICompatibleProviderError } from "./openaiCompatible.js";
 import { RunCallBudget } from "./runBudget.js";
-import type { DeepSeekConfig } from "../config/deepseekConfig.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── P0 Task 1: live-run authorization and budget policy ──────────
 // Default stays fixture/offline. Real (live) mode exists ONLY for the
@@ -13,7 +13,19 @@ import type { DeepSeekConfig } from "../config/deepseekConfig.js";
 // they carry field names and ranges, never keys, prompts, or URLs with
 // credentials.
 
-const FAKE_CONFIG: DeepSeekConfig = { apiKey: "sk-test-not-a-real-key", baseUrl: "https://unit.test.invalid", model: "deepseek-test" };
+const FAKE_CONFIG: LlmConfig = {
+  apiKey: "sk-test-not-a-real-key",
+  authMode: "bearer",
+  baseUrl: "https://unit.test.invalid",
+  endpoint: "https://unit.test.invalid/chat/completions",
+  model: "deepseek-test",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
+};
 
 function fullInput(overrides: Partial<LiveRunPolicyInput> = {}): LiveRunPolicyInput {
   return {
@@ -92,16 +104,15 @@ test("a fully authorized input returns a frozen live policy", () => {
   const policy = parseLiveRunPolicy(fullInput());
   assert.equal(policy.mode, "live");
   assert.equal(policy.noRelease, true);
-  assert.equal(policy.providerName, "deepseek");
+  assert.equal(policy.providerName, "openai-compatible");
+  assert.equal(policy.requestPreset, "deepseek");
   assert.equal(Object.isFrozen(policy), true);
 });
 
-test("every live role that must return strict JSON disables explicit thinking", () => {
-  assert.equal(thinkingModeOf("mutation"), "disabled");
-  assert.equal(thinkingModeOf("repair"), "disabled");
-  assert.equal(thinkingModeOf("direct-refine"), "disabled");
-  assert.equal(thinkingModeOf("semantic-judge"), "disabled");
-  assert.equal(thinkingModeOf("evaluator"), "disabled");
+test("provider aliases select request presets without creating a second adapter", () => {
+  assert.equal(parseLiveRunPolicy(fullInput({ provider: "deepseek" })).requestPreset, "deepseek");
+  assert.equal(parseLiveRunPolicy(fullInput({ provider: "openai-compatible" })).requestPreset, "portable");
+  assert.equal(parseLiveRunPolicy(fullInput({ provider: "openai-compatible" })).providerName, "openai-compatible");
 });
 
 test("policy errors never echo keys or prompts", () => {

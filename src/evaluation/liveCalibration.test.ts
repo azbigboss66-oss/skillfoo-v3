@@ -22,6 +22,27 @@ const DIMENSIONS = [
   "actionability",
 ] as const;
 
+const CALIBRATION_PROVIDER_IDENTITY = {
+  adapterVersion: "openai-chat-completions-v1",
+  name: "openai-compatible",
+  endpointIdentity: "9".repeat(24),
+  model: "deepseek-v4-flash",
+  authMode: "bearer",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
+  roles: {
+    semanticJudge: {
+      requestTimeoutMs: 120_000,
+      maxOutputTokensBehavior: "provider-default",
+      configFingerprint: "c".repeat(24),
+    },
+  },
+} as const;
+
 function responseFor(scores: { good: number; borderline: number; unsafe: number }) {
   return {
     content: JSON.stringify({
@@ -171,7 +192,7 @@ function passedEvidence(overrides: Partial<LiveCalibrationEvidence> = {}): LiveC
     status: "passed",
     contractSha256: "a".repeat(64),
     calibrationTripletSha256: "b".repeat(64),
-    provider: { name: "deepseek", model: "deepseek-v4-flash", configFingerprint: "c".repeat(24) },
+    provider: CALIBRATION_PROVIDER_IDENTITY,
     confirmationMode: "human",
     explorationOnly: false,
     humanConfirmationBypassed: false,
@@ -220,8 +241,7 @@ test("calibration evidence schema and Adaptive gate reject missing or mismatched
   const expected = {
     contractSha256: "a".repeat(64),
     calibrationTripletSha256: "b".repeat(64),
-    model: "deepseek-v4-flash",
-    configFingerprint: "c".repeat(24),
+    providerIdentity: CALIBRATION_PROVIDER_IDENTITY,
     confirmationMode: "human" as const,
   };
 
@@ -240,8 +260,7 @@ test("Adaptive calibration gate rejects missing success, contract drift, and pro
   const expected = {
     contractSha256: "a".repeat(64),
     calibrationTripletSha256: "b".repeat(64),
-    model: "deepseek-v4-flash",
-    configFingerprint: "c".repeat(24),
+    providerIdentity: CALIBRATION_PROVIDER_IDENTITY,
     confirmationMode: "human" as const,
   };
   assert.doesNotThrow(() => assertCalibrationEvidenceForAdaptive(passedEvidence(), expected));
@@ -249,7 +268,17 @@ test("Adaptive calibration gate rejects missing success, contract drift, and pro
     passedEvidence({ status: "failed" as "passed" }),
     passedEvidence({ contractSha256: "0".repeat(64) }),
     passedEvidence({ calibrationTripletSha256: "1".repeat(64) }),
-    passedEvidence({ provider: { name: "deepseek", model: "deepseek-v4-flash", configFingerprint: "2".repeat(24) } }),
+    passedEvidence({
+      provider: {
+        ...CALIBRATION_PROVIDER_IDENTITY,
+        roles: {
+          semanticJudge: {
+            ...CALIBRATION_PROVIDER_IDENTITY.roles.semanticJudge,
+            configFingerprint: "2".repeat(24),
+          },
+        },
+      },
+    }),
   ]) {
     assert.throws(
       () => assertCalibrationEvidenceForAdaptive(evidence, expected),

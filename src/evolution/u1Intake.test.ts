@@ -375,7 +375,19 @@ function mutationProvider(): Provider {
   const budget = new RunCallBudget({ maxLogicalCalls: 5, maxRetryAttempts: 0 });
   return createBudgetedProvider(
     new OpenAICompatibleProvider(
-      { apiKey: "test-key", baseUrl: "https://api.deepseek.com", model: "deepseek-v4-flash" },
+      {
+        apiKey: "test-key",
+        authMode: "bearer",
+        baseUrl: "https://api.deepseek.com",
+        endpoint: "https://api.deepseek.com/chat/completions",
+        model: "deepseek-v4-flash",
+        requestProfile: {
+          preset: "deepseek",
+          jsonMode: "json_object",
+          reasoningMode: "thinking-disabled",
+          maxTokensField: "max_tokens",
+        },
+      },
       8000,
       { budget, role: "mutation", maxRetries: 0, maxOutputTokens: 3000 },
     ),

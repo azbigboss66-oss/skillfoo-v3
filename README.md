@@ -49,17 +49,28 @@ node dist/cli.js --help
 
 安装、构建、测试与帮助命令不需要模型密钥，也不会调用真实 Provider。
 
-### 配置 DeepSeek
+### 配置 OpenAI-compatible Provider
 
-Live 执行当前只支持 DeepSeek。真实运行前，在进程环境变量或被忽略的本地 `.env` 中设置 `DEEPSEEK_API_KEY`；可从空值模板 `.env.example` 开始配置。默认模型名来自本地配置，不代表上游账号一定已开放该模型：
+Live 执行使用一条 OpenAI-compatible Chat Completions adapter，不猜测厂商、endpoint、model 或鉴权方式。必须显式设置 `LLM_BASE_URL`、`LLM_MODEL` 和 `LLM_AUTH_MODE`；`bearer` 模式还必须设置 `LLM_API_KEY`。旧 `DEEPSEEK_*` 变量不会作为静默 fallback。
+
+本地无鉴权 endpoint 示例：
 
 ```dotenv
-DEEPSEEK_API_KEY=<your-key>
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-v4-flash
+LLM_BASE_URL=http://127.0.0.1:11434/v1
+LLM_MODEL=<local-model>
+LLM_AUTH_MODE=none
 ```
 
-不要把真实 Key 写入 `.env.example`、命令参数、结果、日志或 Git 历史。
+云端 Bearer endpoint 示例：
+
+```dotenv
+LLM_BASE_URL=https://provider.example/v1
+LLM_MODEL=<model>
+LLM_AUTH_MODE=bearer
+LLM_API_KEY=<your-key>
+```
+
+`authMode=none` 只表示不发送 `Authorization` header，不代表禁止网络访问。不要把真实 Key 写入 `.env.example`、命令参数、结果、日志或 Git 历史。默认 `portable` preset 不添加厂商专属字段；CLI 的 `deepseek` 选项仍复用同一 adapter，只选择显式 DeepSeek request preset。
 
 ### 最少输入
 
@@ -137,17 +148,17 @@ node dist/cli.js eval-freeze --dir <project-dir> --adapter instruction-v1
 node dist/cli.js bootstrap --dir <project-dir>/formal-evidence --skill-dir <project-dir>/b0-source --adapter instruction-v1 --out <project-dir>/formal-evidence/bootstrap
 ```
 
-下列阶段在省略 `--execute` 时不发送 Provider 请求且不写运行结果，但仍会校验完整授权参数；`calibration-run` 当前还会读取 DeepSeek 配置。检查输出后，只有在真实运行时才追加 `--execute`；`--no-release` 表示即使生成候选也不发布：
+下列阶段在省略 `--execute` 时不发送 Provider 请求且不写运行结果，但仍会校验完整授权参数；所有 live 阶段读取同一份显式 `LLM_*` 配置。检查输出后，只有在真实运行时才追加 `--execute`；`--no-release` 表示即使生成候选也不发布：
 
 ```bash
-node dist/cli.js calibration-run --dir <project-dir> --out <project-dir>/formal-evidence/adaptive --provider deepseek --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --max-retry-attempts 0 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000
+node dist/cli.js calibration-run --dir <project-dir> --out <project-dir>/formal-evidence/adaptive --provider openai-compatible --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --max-retry-attempts 0 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000
 
-node dist/cli.js adaptive-run --dir <project-dir> --skill-md <project-dir>/formal-evidence/b0-source/SKILL.md --out <project-dir>/formal-evidence/adaptive --provider deepseek --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000 --mode standard --max-generations 2 --max-refinements 2 --max-in-flight 2
+node dist/cli.js adaptive-run --dir <project-dir> --skill-md <project-dir>/formal-evidence/b0-source/SKILL.md --out <project-dir>/formal-evidence/adaptive --provider openai-compatible --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000 --mode standard --max-generations 2 --max-refinements 2 --max-in-flight 1
 
-node dist/cli.js direct-run --dir <project-dir> --skill-md <project-dir>/formal-evidence/b0-source/SKILL.md --out <project-dir>/formal-evidence/adaptive --strategy one_shot --provider deepseek --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000 --mode standard --max-in-flight 2
+node dist/cli.js direct-run --dir <project-dir> --skill-md <project-dir>/formal-evidence/b0-source/SKILL.md --out <project-dir>/formal-evidence/adaptive --strategy one_shot --provider openai-compatible --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000 --mode standard --max-in-flight 1
 
 # 仅在 public-select 形成合格新冠军且其它正式门禁满足时才可能读取 sealed
-node dist/cli.js audit-compare --dir <project-dir> --out <project-dir>/formal-evidence/audit --provider deepseek --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000
+node dist/cli.js audit-compare --dir <project-dir> --out <project-dir>/formal-evidence/audit --provider openai-compatible --allow-network --confirm-real-provider I_UNDERSTAND_REAL_PROVIDER_COSTS --no-release --call-envelope-multiplier 2 --max-retry-attempts 2 --evaluator-request-timeout-ms 120000 --proposer-request-timeout-ms 180000
 ```
 
 上述命令通过显式 `--out` 让 Calibration、Adaptive 与 Direct 共用 `<project-dir>/formal-evidence/adaptive`，并让 conditional audit 写入 `<project-dir>/formal-evidence/audit`；不要依赖命令各自的默认输出目录。依赖型 `reference-v1` 必须在相关命令中显式传入 `--runtime-context <runtime-context.v1.json>`。完整合同、预算与资格语义见 [docs/U1_CONTRACT.md](docs/U1_CONTRACT.md)。
@@ -162,7 +173,7 @@ node dist/cli.js audit-compare --dir <project-dir> --out <project-dir>/formal-ev
 - **冻结运行上下文**：`reference-v1` 只允许通过声明过的逻辑 ID 读取 hash-bound、只读、零网络上下文；它不授权任意路径、命令或真实外部行动。
 - **三层资格**：Comparison baseline、Eligible champion 与 Releaseable candidate 含义不同。“完成但得 0 分”不等于“评测没有完成”，但无效 JSON 或 hard-contract 失败的候选绝不能成为冠军。Releaseable 还需要额外门禁；本仓库描述的正式运行保持 no-release。
 - **保留起点是正常结果**：没有合格改进时保留所选 Starting Reference（B0 或 S0），说明非退化保护生效，不代表演化获得成功。
-- **Provider 仍有边界**：正式运行当前主要绑定 DeepSeek；本项目尚未实现任意厂商 API 通用化。
+- **Provider 仍有边界**：正式运行使用单一 OpenAI-compatible Chat Completions adapter；`portable` 与 `deepseek` 只是显式 request preset。它不代表支持任意厂商协议、Responses API 或未声明的请求字段，具体 endpoint/model 仍需操作员验证。
 - **同模型局限仍存在**：同一模型家族可能承担 proposer、evaluator 与 semantic judge。角色隔离、严格 schema 和 deterministic gates 能降低风险，但不等于独立外部验证或普遍效果证明。
 - **发布相互独立**：GitHub 源码公开、npm 发布与生成候选 Skill 的 release 是三种不同操作；本仓库保持 `private: true`，不会自动 push、publish 或 release。
 

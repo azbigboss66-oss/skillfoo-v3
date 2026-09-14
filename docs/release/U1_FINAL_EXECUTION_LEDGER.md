@@ -525,3 +525,42 @@ Canonical SHA-256：events=`1e8ad1122085f9229ae3b3f6f1cfa3b5492a6f46c0a09198b9c5
 三案均形成真实 Adaptive、terminal public-select、Direct 和 canonical no-entry 证据；没有合格新 evolved champion，全部保留 Starting Reference，sealed body 总读取次数=0，release/push/publish 均未发生。结论只能是：终止状态链和当前工程主链在三案中正常运行，但本轮三个自然重建合同没有证明 Adaptive 演化增益；Case 1/3 的原版 B0 被保留，Case 2 的 S0 被保留。该结果不证明 U1 普遍无效，也不能把同模型评分当成独立人类评审。
 
 最终新鲜验收：`npm run build` 通过；`npm test`=`772 pass / 0 fail`；`git diff --check` 通过（仅有 Windows 工作树 LF→CRLF 提示）；活跃 `src/dist/README/U1_CONTRACT` Pairwise 专属符号=0；三个活动 Case 目录旧 contract hash=0；54 个 tracked/current evidence 文件中配置的真实 API key=0、private key=0；15 个 bootstrap/candidate/current-result 文件 sealed body marker=0；三个 Case 目录 tmp/staging/backup/debug/scratch=0。`.gitignore` 仍仅有用户既存的 `projects/v3.2-u1-value-validation/` 单行新增，未被改写、暂存或提交。
+
+## 15. 2026-09-14 Generic OpenAI-compatible Provider 双环境有界验证
+
+本节只记录当前 OpenAI-compatible Chat Completions 接线的真实协议验证；第 1–14 节历史运行事实保持不变。本轮没有重跑正式三案例，也不把连接兼容性或一次代表性运行表述为新的模型优化效果。验证产物位于被 Git 忽略的 `projects/v3.2-u1-value-validation/provider-compat-verification/`，不进入公开源码。账本不记录 API key、Authorization、原始 endpoint、原始请求或 Provider 原始响应。
+
+旧 `DEEPSEEK_*` 隐式配置已由显式的 `LLM_BASE_URL`、`LLM_MODEL`、`LLM_AUTH_MODE`、可选 `LLM_API_KEY` 和请求 profile 取代；`deepseek` 仅保留为同一 adapter 的显式 request preset。URL 经过规范化并只追加一次 `/chat/completions`，`authMode=none` 不发送 Authorization header；落盘 identity 仅保存 endpoint 的不透明哈希与可审计配置，不保存完整 URL 或凭据。
+
+| 环境 | endpoint identity | model | auth | request profile |
+|---|---|---|---|---|
+| Cloud | `948f1ecb6b48f91adc4e110d` | `deepseek-v4-flash` | `bearer` | `deepseek / json_object / thinking-disabled / max_tokens` |
+| Local | `4886ae738074e065077acc1d` | `qwen3:8b` | `none` | `portable / json_object / provider-default / max_tokens` |
+
+两套环境各自的 provider-check、calibration 和后续阶段使用相同 provider identity；Cloud 与 Local 不因协议相同而被描述成相同模型身份。代表性任务复用一份既有 human 2/2、`humanConfirmationBypassed=false`、contract=`85eca89c09cb7b487531b0c16011d74ad0d15d1ccffbd7d296e481d01bcacf91` 的冻结 Case 1 合同，但写入独立忽略目录，未覆盖正式三案 canonical 证据。
+
+### Cloud DeepSeek
+
+- provider-check：通过，`1 logical / 1 HTTP / 0 retry`；artifact SHA-256=`6b89e3ecdb90eeb4933260a5fdccceaf53305b465fb2056d33dc03198848c28c`。
+- calibration：通过，`2 / 2 / 0`、application recovery=0；pass 1=`Good 84.5 / Borderline 56.5 / Unsafe 10.75`，pass 2=`89.5 / 39.5 / 6.5`；Token=`1900 prompt / 1197 completion`；artifact SHA-256=`d39d50b47353f5e0c207af363572dc76c3d5c20ffd79c2097c7e1e3bb50ea626`。
+- Adaptive：两代，`no_valid_child` 合法终止；Anchor=`b0-anchor`、Elite=`s0-scaffold`、Diversity=`b0-anchor`，第二代 exploit/diversify 均为重复 hash/no_change；`66 logical / 66 HTTP / 0 retry`，application recovery=0，cache=`6 hit / 30 miss`，Token=`141604 / 47632`，wall=`179335 ms`、serial-equivalent=`264460 ms`、max in flight=2。events SHA-256=`e5d4e3af4b745c0ee4bd301f6cb9876042290f6f534b9b2615f95a82b7c73110`；Adaptive SHA-256=`45e833dbcd253bd931f6485bc42c64677ddc73ec2675eabe59cd5289788f150f`。
+- terminal public-select：`25 / 25 / 0`，recovery=0，cache=`0 / 25`，Token=`47946 / 15289`。B0=`88`（五维 `90.33 / 86.33 / 87.17 / 89.67 / 87.5`，comparison/champion=`true/true`）；S0=`46`（`61 / 61.5 / 60.33 / 59.83 / 58`，`false/false`）。Starting Reference 和 Final Public Champion 均为 `b0-reference`，verdict=`start_reference_retained`、delta=`0`；artifact SHA-256=`1e438ec56846f61677bcd19f33d1b39dc8daec1d9e176b1ec04b91a03bc465eb`。
+- Direct：真实进入 Provider，`1 / 1 / 0`，recovery=0，cache=`0 / 1`，Token=`596 / 1439`，elapsed=`8312 ms`；候选因 `DIRECT_U1_BOUNDARY_VIOLATION` 被 capability gate 拒绝，未伪写为 0 分，也未追溯修改 public 决策。artifact SHA-256=`235d87ba81ebf75311d3d0117297f08834947d1f2c0149aa33fbd82825e0f61f`。
+- 未形成 novel champion，sealed 未进入、holdout body 未读、候选 release 未进入。
+
+Cloud 可审计总计（不含 provider-check 未返回的 Token usage）：`95 logical / 95 HTTP / 0 transport retry`，Token=`192046 prompt / 65557 completion`。
+
+### Local Ollama
+
+- provider-check：通过，`1 logical / 1 HTTP / 0 retry`；artifact SHA-256=`f372e2af48e3dcab737aa6b4ecf6c46c09c9c79f0b054805b03a8fe9d89275da`。
+- calibration：通过，`2 / 2 / 0`、application recovery=0；pass 1=`Good 92.25 / Borderline 70.25 / Unsafe 37`，pass 2=`83.25 / 71.75 / 45.25`；Token=`2817 / 1171`；artifact SHA-256=`9ab2492ae9b01d85a4f9f8e186ee6af0bf7bf9be6b5bee919081872a31125331`。
+- Adaptive：以 `maxInFlight=1` 串行真实运行。generation 0 根节点筛选和 generation 1 均完成；generation 2 的 proposer 在现有内容无关结构恢复后仍未满足 JSON 合同，按共享终止状态规则落盘为 `proposer_failure`。实际 `50 logical / 50 HTTP / 0 transport retry`，application recovery=3，cache=`6 hit / 24 miss`，Token=`120268 / 17107`（50/50 responses 有 usage），elapsed=`1428145 ms`。失败 artifact 只保存稳定错误码和脱敏摘要，SHA-256=`b2171f609a3e70dbcd0c03ff288fc8f76ea5f8c9e80a916e9fcfc2022ba3a74d`。
+- 因 Adaptive 没有形成可比较的 public 结果，Local Direct、sealed 均 `not_run`；没有重跑 Adaptive，也没有把 proposer failure 伪装成候选低分。
+
+Local 可审计总计（不含 provider-check 未返回的 Token usage）：`53 logical / 53 HTTP / 0 transport retry`，Token=`123085 prompt / 18278 completion`。
+
+### 有界结论
+
+- 通用 adapter 已在 bearer Cloud 与 no-auth Local 两种真实 endpoint 上完成可解析请求；Cloud 进一步完成 Adaptive、terminal public-select 和 Direct，Local 在第二代 proposer 合同失败处正确 fail closed 并保留脱敏证据。
+- 该结果证明配置、鉴权、身份绑定、实际 HTTP、Token telemetry 与失败落盘接线可用；它不证明任意 OpenAI-compatible 服务都兼容，也不证明 Adaptive 普遍有效。
+- 两套运行均为 provider-default/observe-only Token、无 Pairwise、未读取 sealed、未执行候选 release。本节记录时未 npm publish、未发布候选 Skill；后续公开源码提交不包含上述私有运行产物。

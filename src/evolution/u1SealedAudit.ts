@@ -7,6 +7,7 @@ import {
   EvaluationContractV3Schema,
   FrozenContractManifestSchema,
   HoldoutFileSchema,
+  OpenAICompatibleProviderIdentitySchema,
   U1ScoringIdentitySchema,
   U1BDraftItemSchema,
   type DraftItem,
@@ -15,6 +16,7 @@ import {
   FrozenContractManifest,
   TaskCardConfirmation,
   type U1ApplicationRecoverySummary,
+  type OpenAICompatibleProviderIdentity,
   type U1ScoringIdentity,
 } from "../types.js";
 import {
@@ -94,6 +96,8 @@ export interface U1SealedAuditArguments {
   budget: RunCallBudget;
   runner: FunnelScenarioRunner;
   scoreRuns?: SealedInstructionBatchScorer;
+  /** Required only for a real sealed Provider execution; never contains credentials. */
+  providerIdentity?: OpenAICompatibleProviderIdentity;
   now?: () => string;
 }
 
@@ -134,6 +138,7 @@ export interface U1SealedCompletedResult {
   /** Content-free candidate-item attempt evidence for the current one-shot envelope. */
   applicationRecovery: U1ApplicationRecoverySummary[];
   providerTokenTelemetry: z.infer<typeof ProviderTokenTelemetryEvidenceSchema>;
+  provider?: OpenAICompatibleProviderIdentity;
   scoringIdentity?: U1ScoringIdentity;
 }
 
@@ -255,6 +260,7 @@ export const U1SealedCompletedArtifactSchema = z.object({
   budget: U1SealedBudgetEvidenceSchema,
   applicationRecovery: z.array(U1SealedApplicationRecoverySummarySchema),
   providerTokenTelemetry: ProviderTokenTelemetryEvidenceSchema,
+  provider: OpenAICompatibleProviderIdentitySchema.optional(),
   scoringIdentity: U1ScoringIdentitySchema.optional(),
   verificationMode: z.enum(["live-formal", "test-fixture"]),
   formalEvidence: z.boolean(),
@@ -281,6 +287,16 @@ export const U1SealedCompletedArtifactSchema = z.object({
       path: ["providerTokenTelemetry"],
     });
   }
+  if (
+    (value.verificationMode === "live-formal" && !value.provider) ||
+    (value.verificationMode === "test-fixture" && value.provider)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "live sealed evidence requires a safe Provider identity; zero-network fixtures must not claim one",
+      path: ["provider"],
+    });
+  }
   if (value.applicationRecovery.length !== value.budget.assumptions.holdoutItems * 3) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -304,6 +320,7 @@ export const U1SealedFailureArtifactSchema = z.object({
   budget: U1SealedBudgetEvidenceSchema,
   accounting: SealedAccountingSchema,
   providerTokenTelemetry: ProviderTokenTelemetryEvidenceSchema,
+  provider: OpenAICompatibleProviderIdentitySchema.optional(),
   dynamicEnvelopeExhaustion: DynamicEnvelopeExhaustionEvidenceSchema.optional(),
   scoringIdentity: U1ScoringIdentitySchema.optional(),
   bodyReads: z.literal(1),
@@ -331,6 +348,16 @@ export const U1SealedFailureArtifactSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: "sealed failure must preserve bounded accounting and detailed token telemetry",
       path: ["accounting"],
+    });
+  }
+  if (
+    (value.verificationMode === "live-formal" && !value.provider) ||
+    (value.verificationMode === "test-fixture" && value.provider)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "live sealed failure requires a safe Provider identity; zero-network fixtures must not claim one",
+      path: ["provider"],
     });
   }
   if (value.safeError.code === "DYNAMIC_ENVELOPE_EXHAUSTED") {
@@ -433,6 +460,12 @@ function requireFormalGate(args: U1SealedAuditArguments, manifest: FrozenContrac
     fail(
       "U1_SEALED_FORMAL_CONFIRMATION_REQUIRED",
       "U1 sealed requires two separately bound real-human confirmations and formalEvidence=true",
+    );
+  }
+  if (!args.providerIdentity) {
+    fail(
+      "U1_SEALED_PROVIDER_IDENTITY_REQUIRED",
+      "live sealed execution requires a credential-free OpenAI-compatible Provider identity before the holdout opens",
     );
   }
   if (args.contract.explorationOnly) {
@@ -793,6 +826,7 @@ export async function runU1SealedAudit(args: U1SealedAuditArguments): Promise<U1
       ...args.budget.providerTokenTelemetry(),
       byStageRoleModel: args.budget.providerTokenTelemetryByTags(),
     },
+    ...(args.providerIdentity ? { provider: args.providerIdentity } : {}),
     scoringIdentity,
   };
 }

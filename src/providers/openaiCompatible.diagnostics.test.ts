@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { OpenAICompatibleProvider, OpenAICompatibleProviderError } from "./openaiCompatible.js";
 import { RunCallBudget } from "./runBudget.js";
-import type { DeepSeekConfig } from "../config/deepseekConfig.js";
+import type { LlmConfig } from "../config/llmConfig.js";
 
 // ── P1 任务 1 Red→Green：Provider 安全诊断 ─────────────────────────
 //
@@ -11,10 +11,18 @@ import type { DeepSeekConfig } from "../config/deepseekConfig.js";
 // length 截断确定性失败不重试；失败响应的 usage 仍记账；任何错误
 // 或诊断都不携带密钥、prompt、响应体、完整 baseUrl。
 
-const FAKE_CONFIG: DeepSeekConfig = {
+const FAKE_CONFIG: LlmConfig = {
   apiKey: "test-key",
+  authMode: "bearer",
   baseUrl: "https://api.deepseek.com",
+  endpoint: "https://api.deepseek.com/chat/completions",
   model: "deepseek-v4-flash",
+  requestProfile: {
+    preset: "deepseek",
+    jsonMode: "json_object",
+    reasoningMode: "thinking-disabled",
+    maxTokensField: "max_tokens",
+  },
 };
 
 const PROMPT_MARKER = "UNIQUE_PROMPT_MARKER_do_not_leak";
